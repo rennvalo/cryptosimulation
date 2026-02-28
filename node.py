@@ -430,7 +430,7 @@ async def submit_block(payload: dict) -> JSONResponse:
         balances = blockchain.compute_balances()
         for q in list(_sse_clients):
             try:
-                q.put_nowait({"type": "balance_update", "data": balances})
+                q.put_nowait({"type": "balance_update", "data": {"balances": balances, "miner_addresses": miner_addresses}})
             except asyncio.QueueFull:
                 pass
 
@@ -548,6 +548,7 @@ async def start_simulation(payload: dict) -> JSONResponse:
         "num_miners": num_miners,
         "active": active_miner_ids,
         "target": NUM_BLOCKS,
+        "miner_addresses": miner_addresses,
     }
 
     for q in list(_sse_clients):
@@ -1276,8 +1277,9 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
     }});
 
     es.addEventListener('balance_update', (e) => {{
-      const balances = JSON.parse(e.data);
-      Object.assign(latestBalances, balances);
+      const {{balances, miner_addresses}} = JSON.parse(e.data);
+      if (balances) Object.assign(latestBalances, balances);
+      if (miner_addresses) Object.assign(minerAddrs, miner_addresses);
       updateLeaderboard();
     }});
 

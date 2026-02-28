@@ -169,7 +169,7 @@ def _register_with_node() -> dict:
       {"status": "active", "tip": {...}, "difficulty": N}      — sim running, we're in
       {"status": "idle"}                                        — sim running, not selected
     """
-    payload = {"miner_id": MINER_ID, "callback_url": MINER_URL}
+    payload = {"miner_id": MINER_ID, "callback_url": MINER_URL, "address": _wallet.address}
     attempt = 0
     while True:
         attempt += 1
