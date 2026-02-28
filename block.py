@@ -20,7 +20,7 @@ class Block:
 
     index: int              # Position in the chain (0 = genesis block)
     timestamp: float        # Unix epoch time when the block was created
-    transactions: List[str] # Simplified: list of plain-text transaction strings
+    transactions: List[dict] # List of serialised Transaction dicts (coinbase first)
     previous_hash: str      # Hash of the preceding block (links the chain)
     nonce: int = 0          # Proof-of-work value that miners iterate over
     hash: str = ""          # SHA-256 hash of this block's full contents

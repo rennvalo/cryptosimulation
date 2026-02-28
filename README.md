@@ -1,8 +1,8 @@
-# ⛏️ CryptoSim — Bitcoin-Style Mining Simulation
+# ⛏️ CryptoSim — RennCoin Mining Simulation
 
-A fully containerised, beginner-friendly simulation of how Bitcoin mining actually works.
-Three miners race each other to solve a mathematical puzzle. The first one to solve it wins
-the right to add the next block to the blockchain. Watch it all happen live in your browser.
+A beginner-friendly simulation of how Bitcoin-style cryptocurrency actually works.
+Up to 10 miners race each other to solve puzzles, earn **RennCoin (RNC)**, and build
+a blockchain — all visible live in your browser.
 
 > **No crypto experience needed.** If you can run `docker compose up`, you can run this.
 
@@ -11,122 +11,180 @@ the right to add the next block to the blockchain. Watch it all happen live in y
 ## 📖 Table of Contents
 
 1. [What is this?](#-what-is-this)
-2. [How does Bitcoin mining actually work?](#-how-does-bitcoin-mining-actually-work)
-3. [How this simulation works](#-how-this-simulation-works)
-4. [System architecture](#-system-architecture)
-5. [Flowcharts](#-flowcharts)
-   - [Overall simulation flow](#overall-simulation-flow)
-   - [What a miner does](#what-a-miner-does)
-   - [What the node does when a block is submitted](#what-the-node-does-when-a-block-is-submitted)
-6. [Project file structure](#-project-file-structure)
-7. [File responsibilities](#-file-responsibilities)
+2. [The core idea — it's just a puzzle contest](#-the-core-idea--its-just-a-puzzle-contest)
+3. [What's new — RennCoin features](#-whats-new--renncoin-features)
+4. [How the simulation works](#-how-the-simulation-works)
+5. [System architecture](#-system-architecture)
+6. [Flowcharts](#-flowcharts)
+7. [Project files](#-project-files)
 8. [Quick start](#-quick-start)
 9. [The live dashboard](#-the-live-dashboard)
 10. [Configuration & tuning](#-configuration--tuning)
-11. [Adding more miners](#-adding-more-miners)
-12. [Useful commands](#-useful-commands)
-13. [Glossary](#-glossary)
+11. [Useful commands](#-useful-commands)
+12. [Glossary](#-glossary)
 
 ---
 
 ## 🤔 What is this?
 
-This project simulates the core mechanics of Bitcoin at a simplified level using:
+This project recreates the core mechanics of Bitcoin on your own computer using
+Docker containers that talk to each other like real computers on the internet.
 
-- **Docker containers** — each container is like an independent computer on the internet
-- **Python + FastAPI** — lightweight web servers inside each container
-- **SHA-256 hashing** — the same algorithm Bitcoin uses
-- **Proof-of-Work** — the mathematical puzzle miners must solve
-- **A live web dashboard** — so you can watch everything happen in real time
-
-Think of it like a race. Multiple miners are simultaneously trying to solve the same puzzle.
-The fastest one wins, adds a block to the chain, and everyone else abandons their current
-attempt and starts fresh on the next puzzle.
+You configure the experiment through a webpage, hit **Start**, and watch up to 10 miners
+race in real time. The winner of each round earns **RennCoin**, gets their name on the
+leaderboard, and their block gets added to the chain. Once the target number of blocks is
+mined, the simulation ends — and you can run another experiment with different settings
+without restarting anything.
 
 ---
 
-## 🪙 How does Bitcoin mining actually work?
+## 🧩 The core idea — it's just a puzzle contest
 
-Before looking at the code, here's the concept in plain English:
+### Difficulty = how hard the puzzle is
 
-### The puzzle
+Imagine a puzzle contest where everyone gets the same box of puzzle pieces at the same time
+and races to finish first.
 
-Bitcoin asks miners to find a number (called a **nonce**) such that when you combine it with
-the block's data and run it through a hash function, the result starts with a certain number
-of zeros.
+- **Difficulty 3** → a simple 10-piece puzzle. Anyone can finish in seconds.
+- **Difficulty 4** → a 100-piece puzzle. Takes a minute or two.
+- **Difficulty 5** → a 1,000-piece puzzle. Now we're talking real effort.
+- **Difficulty 6** → a 10,000-piece puzzle. Takes a long time even for a fast computer.
+
+In this simulation, "solving the puzzle" means finding a special number (called a **nonce**)
+that, when combined with the block's data and run through a mathematical fingerprint
+function (SHA-256), produces a result starting with a certain number of zeros:
 
 ```
-SHA-256( block_data + nonce )  →  "0000a3f7c2..." ✅  (starts with 4 zeros = valid!)
-SHA-256( block_data + nonce )  →  "a3f7c20041..." ❌  (doesn't start with zeros = try again)
+SHA-256( block_data + nonce )  →  "0000a3f7c2..."  ✅  starts with 4 zeros — puzzle solved!
+SHA-256( block_data + nonce )  →  "a3f7c20041..."  ❌  no leading zeros — keep trying
 ```
 
-### Why is this hard?
+There is no shortcut. The only way to solve it is to **try billions of numbers** until one
+works. This is called **Proof-of-Work**, and it's intentional — the effort makes cheating
+expensive.
 
-SHA-256 is a one-way function — you cannot work backwards from the result to find the input.
-The only way to find a valid nonce is to **try billions of numbers** until one works.
-This is called **brute-force search**, and it's intentionally expensive in time and energy.
+### Why the puzzle matters
 
-### Why bother?
+Think of the blockchain as a public scoreboard locked in a glass case. To add a new line
+to the scoreboard, you must first win the puzzle contest. This means:
 
-The difficulty ensures that adding a block takes real effort. This prevents anyone from
-fraudulently rewriting history, because they would have to redo all that computational
-work — faster than the entire rest of the network combined.
+- Anyone can *read* the scoreboard for free.
+- Adding a *new entry* costs real computational work.
+- Going *back and changing* an old entry means re-winning every contest from that point
+  forward — faster than everyone else combined. Practically impossible.
+
+That's what makes blockchain records trustworthy without needing a central authority.
 
 ### The chain
 
-Each block contains the **hash of the previous block**. This creates a chain:
+Each block contains the **fingerprint (hash) of the previous block**. Blocks are linked
+like a chain of rings — pull one out and the whole chain from that point breaks:
 
 ```
-[ Genesis Block ] ← [ Block #1 ] ← [ Block #2 ] ← [ Block #3 ] ← ...
+[ Block #0 Genesis ] ← [ Block #1 ] ← [ Block #2 ] ← [ Block #3 ] ← ...
 ```
 
-If you tamper with Block #1, its hash changes. That breaks Block #2's link.
-That breaks Block #3's link. The entire chain from that point forward is invalidated.
-This is what makes the blockchain **tamper-evident**.
+Tamper with Block #1 and its fingerprint changes. Block #2's stored fingerprint of Block #1
+no longer matches. Block #3's stored fingerprint of Block #2 no longer matches. The entire
+chain from that point is automatically invalidated.
 
 ---
 
-## 🔬 How this simulation works
+## 🪙 What's new — RennCoin features
 
-This project recreates those mechanics using Docker containers talking to each other over HTTP:
+On top of the basic mining simulation, this project adds several real-world Bitcoin
+mechanics:
+
+### 1. Wallets & signed transactions
+Every miner gets a **cryptographic wallet** when it starts — a unique key pair (like a
+padlock and its key). The wallet has an **address** (like an account number).
+
+When a miner wins a block, the reward isn't just a log message — it's a real
+**RennCoin transaction** written into the block:
+> *"Pay 50 RNC from COINBASE to miner_1's wallet address"*
+
+Transactions between wallets are **digitally signed** — only the owner of a wallet can
+authorise a transfer from it, just like only you can sign a cheque from your account.
+
+### 2. Mempool — the waiting room
+Not all transactions make it into a block right away. Pending transactions sit in the
+**mempool** (memory pool) — a waiting room. Think of it like a queue at a post office.
+When a miner wins the right to add a block, they pack the next few waiting transactions
+into it, along with their own reward.
+
+### 3. Fork detection — when two miners finish at the same time
+Occasionally two miners solve the puzzle at almost exactly the same moment. This is called
+a **fork** — like a road splitting in two. The simulation detects this, flags the
+**orphaned chain** (the one that arrived a fraction of a second later), and shows a
+warning banner on the dashboard.
+
+### 4. Finality — locking blocks in
+In Bitcoin, a transaction is considered truly safe after it has had **2 more blocks built
+on top of it** (this simulation) or 6 in real Bitcoin. Think of it like wet concrete:
+- Just poured → still soft, could be disrupted.
+- 2 blocks later → hardened. Very safe.
+- 6 blocks later → solid as rock.
+
+Finalized blocks get a 🔒 lock icon on the dashboard.
+
+### 5. P2P validation — miners check each other's work
+After the node accepts a block, it secretly asks 2 other miners to independently verify it.
+This simulates Bitcoin's decentralised approach where every participant checks every block —
+no single authority is trusted blindly. Results appear in the activity log.
+
+### 6. Leaderboard
+A live leaderboard shows each miner's wallet address, RennCoin balance, and total blocks
+won — updated every time a block is finalized.
+
+### 7. Run another experiment
+When a simulation finishes, a **"Run Another Experiment"** button appears. Click it and
+the setup screen returns with a fresh configuration form — no need to restart Docker.
+
+---
+
+## 🔬 How the simulation works
 
 | Real Bitcoin | This Simulation |
 |---|---|
-| Thousands of miners worldwide | 3 Docker containers on your machine |
-| Gossip protocol (peer-to-peer) | Node pushes blocks directly to each miner (HTTP POST) |
-| 10-minute block time target | Configurable — default ~1–10 seconds |
-| Real monetary reward | Just a log message saying who won 🏆 |
+| Thousands of miners worldwide | Up to 10 Docker containers on your machine |
+| Decentralised gossip protocol | Node pushes blocks to miners via HTTP |
+| 10-minute block time target | Configurable — default a few seconds |
+| Bitcoin (BTC) reward | RennCoin (RNC) — 50 per block |
 | Runs forever | Stops after N blocks (configurable) |
-| SHA-256d (double hash) | Single SHA-256 (simplified) |
+| ECDSA on secp256k1 curve | Same — real cryptographic signatures |
+| Mempool with fee priority | Mempool with randomly generated transfers |
+| 6-confirmation finality | 2-confirmation finality |
 
 ---
 
 ## 🏗️ System architecture
 
-There are **4 Docker containers** running on a shared private network:
+There are **11 Docker containers** on a shared private network:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Docker Network: crypto_net               │
-│                                                             │
-│   ┌─────────────────────────────────┐                       │
-│   │           NODE                  │  ← the authority      │
-│   │        :8182                    │                       │
-│   │  • Owns the blockchain          │                       │
-│   │  • Verifies submitted blocks    │                       │
-│   │  • Pushes accepted blocks to    │                       │
-│   │    all miners                   │                       │
-│   │  • Serves the web dashboard     │                       │
-│   │  • Streams live SSE events      │                       │
-│   └──────┬────────────┬─────────────┘                       │
-│          │ push       │ push                                 │
-│     ┌────▼───┐   ┌────▼───┐   ┌─────────┐                  │
-│     │MINER 1 │   │MINER 2 │   │ MINER 3 │                  │
-│     │ :8001  │   │ :8002  │   │  :8003  │                  │
-│     │ mining │   │ mining │   │  mining │                  │
-│     └────────┘   └────────┘   └─────────┘                  │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                      Docker Network: crypto_net                     │
+│                                                                     │
+│   ┌───────────────────────────────────────┐                         │
+│   │               NODE  :8182             │  ← the authority        │
+│   │                                       │                         │
+│   │  • Owns the blockchain                │                         │
+│   │  • Verifies submitted blocks          │                         │
+│   │  • Manages wallets + balances         │                         │
+│   │  • Detects forks                      │                         │
+│   │  • Tracks mempool                     │                         │
+│   │  • Serves the web dashboard           │                         │
+│   │  • Streams live events to browser     │                         │
+│   └───────┬──────────┬──────────┬─────────┘                         │
+│           │ push     │ push     │ push (up to 10)                   │
+│    ┌──────▼──┐ ┌─────▼───┐ ┌───▼─────┐   ┌─────────┐              │
+│    │MINER 1  │ │MINER 2  │ │MINER 3  │...│MINER 10 │              │
+│    │ :8183   │ │ :8184   │ │ :8185   │   │ :8192   │              │
+│    │ wallet  │ │ wallet  │ │ wallet  │   │ wallet  │              │
+│    │ mining  │ │ mining  │ │ mining  │   │ mining  │              │
+│    └─────────┘ └─────────┘ └─────────┘   └─────────┘              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
          ▲
          │  Your browser connects here
     localhost:8182
@@ -143,39 +201,33 @@ the node decides what gets accepted.
 
 ```mermaid
 flowchart TD
-    A([🐳 docker compose up]) --> B[Docker builds the image\nand starts all 4 containers]
-    B --> C[Node starts up\nCreates genesis block #0]
-    B --> D[Miner 1 starts up]
-    B --> E[Miner 2 starts up]
-    B --> F[Miner 3 starts up]
+    A([🐳 docker compose up]) --> B[Docker starts all 11 containers]
+    B --> C[Node starts — waits for user]
+    B --> D[Miners start — generate wallets\nand register with node]
 
-    D --> G[POST /register → Node]
-    E --> G
-    F --> G
+    D --> E[Dashboard shows setup screen\nUser picks miners + difficulty]
+    E --> F[User clicks Start]
 
-    G --> H[Node replies with\ncurrent chain tip]
+    F --> G[Node initialises blockchain\nand activates chosen miners]
+    G --> H[Miners begin Proof-of-Work loop]
 
-    H --> I[All miners begin\nProof-of-Work loop]
+    H --> I{First miner\nsolves the puzzle}
+    I --> J[Winner submits block to node]
 
-    I --> J{First miner\nsolves the puzzle}
+    J --> K{Node verifies block}
+    K -- Invalid --> L[Rejected — miner tries again]
+    K -- Stale: someone was faster --> M[Rejected 409 — fork logged]
+    K -- Valid --> N[Block added to chain\n50 RNC reward recorded]
 
-    J --> K[Winner POSTs solved block\nto Node /submit_block]
+    N --> O[Node pushes block to all miners]
+    N --> P[Node requests P2P validation\nfrom 2 other miners]
+    N --> Q[Dashboard updates live via SSE]
+    N --> R{2 blocks built on top?}
+    R -- Yes --> S[Block finalized 🔒\nLeaderboard updated]
 
-    K --> L{Node verifies\nthe block}
-
-    L -- Invalid --> M[Node rejects block\n400 Bad Request]
-    L -- Stale\nanother miner won first --> N[Node rejects block\n409 Conflict]
-    L -- Valid --> O[Node appends block\nto the chain]
-
-    O --> P[Node pushes new block\nto ALL miners via HTTP]
-    O --> Q[Node streams event\nto dashboard via SSE]
-
-    P --> R[All miners reset\nand start mining\nblock N+1]
-
-    R --> S{Target block\ncount reached?}
-    S -- No --> I
-    S -- Yes --> T[Node sends /shutdown\nto all miners]
-    T --> U([🏁 Simulation complete])
+    O --> T{Target blocks reached?}
+    T -- No --> H
+    T -- Yes --> U[Simulation ends\nRun Another Experiment button appears]
 ```
 
 ---
@@ -184,323 +236,247 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A([Miner container starts]) --> B[Retry POST /register\nuntil node responds]
-    B --> C[Receive chain tip\nindex + hash]
-    C --> D[Build candidate block\nindex = tip + 1\nprevious_hash = tip hash\nnonce = 0]
+    A([Miner container starts]) --> B[Generate ECDSA wallet\naddress + keypair]
+    B --> C[Register with node\nsend address + public key]
+    C --> D[Poll /config every 2s\nuntil Start is clicked]
+    D --> E{Selected for\nthis run?}
+    E -- No --> F([Stay idle — wait for next experiment])
+    E -- Yes --> G[Receive difficulty and chain tip]
 
-    D --> E[Compute SHA-256\nhash of block]
-    E --> F{Hash starts\nwith 0000?}
+    G --> H[Fetch mempool transactions]
+    H --> I[Build candidate block:\n• coinbase tx — 50 RNC to my wallet\n• up to 5 mempool txs\n• nonce = 0]
 
-    F -- No --> G[nonce = nonce + 1]
-    G --> H{Check every\n1000 iterations:\nstop signal?}
-    H -- No --> E
-    H -- Yes: node pushed\na new block --> C
+    I --> J[Compute SHA-256 hash]
+    J --> K{Hash starts with\nenough zeros?}
+    K -- No --> L[nonce + 1]
+    L --> M{Every 1000 tries:\ndid node push a new block?}
+    M -- No --> J
+    M -- Yes: someone else won --> H
 
-    F -- Yes: SOLVED! --> I[POST solved block\nto Node /submit_block]
-
-    I --> J{Node response?}
-    J -- 200 OK\nAccepted --> K[Wait for node to\npush next block]
-    J -- 409 Conflict\nStale: lost the race --> K
-    J -- 400 Bad Request\nInvalid block --> L[Log error]
-
-    K --> C
-
-    M([POST /new_block received\nfrom node]) --> N[Update local chain tip]
-    N --> O[Set stop_event flag]
-    O --> H
-
-    P([POST /shutdown received]) --> Q([Stop mining loop\nContainer exits])
+    K -- Yes: SOLVED! --> N[Submit block to node]
+    N --> O{Accepted?}
+    O -- Yes --> H
+    O -- No: stale or invalid --> H
 ```
 
 ---
 
-### What the node does when a block is submitted
+### What the node does when a block arrives
 
 ```mermaid
 flowchart TD
-    A([Miner POSTs to\n/submit_block]) --> B[Acquire chain lock\nonly one block can\nwin at a time]
+    A([Miner submits block]) --> B[Acquire chain lock\none winner at a time]
 
-    B --> C{Is block.index ==\nlast_block.index + 1?}
-    C -- No: stale --> D[Release lock\nReturn 409 Conflict]
+    B --> C{Correct block height?}
+    C -- No --> D[Return 409 Stale]
 
-    C -- Yes --> E{Does block.previous_hash\nmatch last block's hash?}
-    E -- No --> F[Release lock\nReturn 400 Invalid]
+    C -- Yes --> E{previous_hash matches\nlast block?}
+    E -- No --> F[Return 400 Invalid]
 
-    E -- Yes --> G[Recompute SHA-256\nof block data]
-    G --> H{Recomputed hash\n== block.hash?}
-    H -- No: tampered --> F
+    E -- Yes --> G[Recompute SHA-256]
+    G --> H{Hash matches\nclaimed hash?}
+    H -- No --> F
 
-    H -- Yes --> I{Does hash start\nwith 0000?\nProof-of-Work check}
+    H -- Yes --> I{Hash meets\ndifficulty target?}
     I -- No --> F
 
-    I -- Yes: all checks passed --> J[Append block\nto chain]
-    J --> K[Release lock]
-
-    K --> L[Stream block event\nto dashboard via SSE]
-    K --> M[Push block to\nall miners via HTTP POST]
-
-    M --> N{Target block\ncount reached?}
-    N -- No --> O([Done — wait for\nnext submission])
-    N -- Yes --> P[Send /shutdown\nto all miners]
-    P --> Q[Send shutdown event\nto dashboard]
-    Q --> O
+    I -- Yes --> J[Append block to chain\nRecord coinbase reward]
+    J --> K[Check for fork:\nwas this height won within 2s?]
+    K --> L[Clean matching txs from mempool]
+    L --> M[Push block to all miners]
+    L --> N[Ask 2 miners to peer-validate]
+    L --> O{2 blocks now\non top of block N-2?}
+    O -- Yes --> P[Finalize block N-2 🔒\nCompute balances\nBroadcast leaderboard update]
+    M --> Q([Wait for next submission])
 ```
 
 ---
 
-## 📁 Project file structure
+## 📁 Project files
 
 ```
 crypto/
 │
-├── block.py            ← The Block data structure + SHA-256 hashing
-├── blockchain.py       ← The Blockchain class (verification + chain management)
-├── node.py             ← The authority node (FastAPI app + SSE dashboard)
-├── miner.py            ← The miner (FastAPI app + background PoW thread)
+├── block.py           ← The Block data structure + SHA-256 hashing
+├── blockchain.py      ← Blockchain rules: verification, finality, fork events, balances
+├── transaction.py     ← RennCoin transaction types (coinbase reward + signed transfers)
+├── wallet.py          ← ECDSA keypair wallet — same curve (secp256k1) as Bitcoin
+├── node.py            ← Authority node: API, dashboard, mempool, fork detection
+├── miner.py           ← Miner: wallet, PoW loop, P2P validation
 │
-├── Dockerfile          ← Single Docker image used by all 4 containers
-├── docker-compose.yml  ← Defines and wires together all 4 services
-├── requirements.txt    ← Python dependencies (fastapi, uvicorn, httpx)
-│
-├── .gitignore          ← Files to never commit to git
-└── README.md           ← This file
+├── Dockerfile         ← Single Docker image used by all 11 containers
+├── docker-compose.yml ← Defines all 11 services and wires them together
+├── requirements.txt   ← Python dependencies
+└── README.md          ← This file
 ```
 
----
+### `block.py`
+A block is a container of data. Think of it like a page in an official ledger:
 
-## 📄 File responsibilities
-
-### `block.py` — The Block
-
-A block is just a Python dataclass (a named container of data):
-
-| Field | Type | Description |
-|---|---|---|
-| `index` | int | Position in the chain. Genesis = 0, next = 1, etc. |
-| `timestamp` | float | Unix time when the block was created |
-| `transactions` | list[str] | Simplified: plain-text strings representing transactions |
-| `previous_hash` | str | SHA-256 hash of the block that comes before this one |
-| `nonce` | int | The number miners iterate over to solve the puzzle |
-| `hash` | str | SHA-256 hash of all the above fields combined |
-
-**Key method:** `compute_hash()` — serialises the block to JSON and returns its SHA-256 hex digest.
+| Field | What it is |
+|---|---|
+| `index` | Page number. Genesis = 0. |
+| `timestamp` | When the page was written. |
+| `transactions` | The list of transfers recorded on this page. |
+| `previous_hash` | The fingerprint of the previous page — this is what forms the chain. |
+| `nonce` | The magic number the miner had to find to win the right to write this page. |
+| `hash` | The fingerprint of this entire page. |
 
 ---
 
-### `blockchain.py` — The Chain
+### `blockchain.py`
+The rulebook. Before any block is accepted it checks four things:
+1. Is it the next page in sequence? (no gaps)
+2. Does it reference the correct previous page? (no broken links)
+3. Does its fingerprint match its contents? (no tampering)
+4. Did the miner actually do the work? (valid proof-of-work)
 
-Holds a list of Blocks and enforces the rules:
-
-- **`__init__`** — creates the genesis block automatically
-- **`verify_block(block)`** — checks 4 things before accepting any block:
-  1. Index is exactly `last_block.index + 1` (no gaps)
-  2. `previous_hash` matches the actual last block's hash (no chain breaks)
-  3. Recomputed hash matches the claimed hash (no tampering)
-  4. Hash starts with the required number of zeros (valid proof-of-work)
-- **`append_block(block)`** — adds a verified block to the chain
+Also handles: tracking confirmed (finalized) blocks, computing balances, recording forks.
 
 ---
 
-### `node.py` — The Authority Node
-
-This is the most complex file. It runs a FastAPI web server with these endpoints:
-
-| Endpoint | Method | Who calls it | What it does |
-|---|---|---|---|
-| `/` | GET | Your browser | Serves the live dashboard HTML page |
-| `/events` | GET | Your browser | Streams live events via SSE (Server-Sent Events) |
-| `/register` | POST | Miners | Registers a miner and returns the current chain tip |
-| `/submit_block` | POST | Miners | Verifies + accepts/rejects a solved block |
-| `/chain` | GET | You / debugging | Returns the full chain as JSON |
-
-**Server-Sent Events (SSE)** is a web technology that keeps a connection open from the
-server to the browser, allowing the server to push updates in real time without the browser
-needing to refresh or poll.
+### `transaction.py`
+Two types of transactions:
+- **Coinbase** — created by the node when a block is won. No sender. Pays 50 RNC to the winning miner. Like the bank printing new coins and handing them to the winner.
+- **Transfer** — a signed payment from one wallet to another. Like writing a cheque — only valid if the signature matches the sender's key.
 
 ---
 
-### `miner.py` — The Miner
+### `wallet.py`
+Every miner has a wallet with:
+- A **private key** — secret, used to sign transactions. Like your PIN.
+- A **public key** — shareable, used by others to verify your signature. Like your signature on a cheque.
+- An **address** — a short fingerprint of your public key. Like your account number.
 
-Each miner container runs this file. It has two parts running simultaneously:
-
-1. **FastAPI HTTP server** (async, event-loop thread):
-   - `POST /new_block` — receives a pushed block from the node, updates the tip
-   - `POST /shutdown` — stops the mining loop permanently
-   - `GET /health` — returns current status (useful for debugging)
-
-2. **Background mining thread** (separate OS thread):
-   - The tight nonce-incrementing loop runs here
-   - Cannot run in the async event loop because it would freeze the HTTP server
-   - Checks a `stop_event` flag every 1,000 iterations to stay responsive to pushes
+Uses the same **secp256k1 elliptic curve** that Bitcoin uses.
 
 ---
 
-### `Dockerfile` — The Container Image
+### `node.py`
+The central authority. Runs a web server with these endpoints:
 
-Both the node and miners use the same Docker image (based on Python 3.11).
-The `command:` line in `docker-compose.yml` tells each container which app to run:
-- Node runs: `uvicorn node:app`
-- Each miner runs: `uvicorn miner:app`
+| Endpoint | What it does |
+|---|---|
+| `GET /` | Serves the dashboard webpage |
+| `GET /events` | Streams live updates to your browser (SSE) |
+| `POST /register` | Miner check-in — receives wallet address |
+| `GET /config` | Miners poll this waiting for Start to be clicked |
+| `POST /start` | User clicks Start — sets difficulty and active miners |
+| `POST /submit_block` | Miner submits a solved block |
+| `GET /mempool` | Returns pending transactions |
+| `GET /balances` | Returns RNC balances and wallet addresses |
+| `POST /reset` | User clicks "Run Another Experiment" |
 
 ---
 
-### `docker-compose.yml` — The Orchestrator
-
-Defines all 4 services, their environment variables, port mappings, and the shared
-Docker network (`crypto_net`) that lets them communicate using service names instead of
-IP addresses (e.g. `http://node:8182` instead of `http://172.18.0.2:8182`).
+### `miner.py`
+Each miner runs two things simultaneously:
+1. **A web server** — listens for blocks pushed by the node, shutdown signals, and peer-validation requests.
+2. **A background mining thread** — the tight puzzle-solving loop. Runs separately so the web server stays responsive even while crunching numbers.
 
 ---
 
 ## 🚀 Quick start
 
 ### Prerequisites
-
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
-- That's it — no Python installation needed on your machine
+- That's it — no Python needed on your machine
 
 ### Steps
 
 ```bash
-# 1. Clone or download this project
+# 1. Go into the project folder
 cd crypto
 
-# 2. Build the Docker image and start all 4 containers
+# 2. Build the Docker image and start all containers
 docker compose up --build
 
-# 3. Open the live dashboard in your browser
+# 3. Open the dashboard in your browser
 #    http://localhost:8182
 
-# 4. When you're done, stop everything
+# 4. Pick how many miners and how hard the puzzle should be, then click Start
+
+# 5. When you're done
 docker compose down
-```
-
-You should see output like this in your terminal:
-
-```
-node      | [NODE] INFO  Genesis block created
-node      | [NODE] INFO  Miner registered: miner_1 @ http://miner_1:8001
-miner_1   | [MINER_1] INFO  Starting PoW for block #1
-miner_2   | [MINER_2] INFO  Starting PoW for block #1
-miner_1   | [MINER_1] INFO  SOLVED block #1  nonce=48291  hash=0000a3f7c2...  (2.41 s)
-node      | [NODE] INFO  Block #1 ACCEPTED  |  miner=miner_1  nonce=48291  time=2.41s
-miner_2   | [MINER_2] INFO  Block #1 mining interrupted — node received block from another miner
 ```
 
 ---
 
 ## 🖥️ The live dashboard
 
-Open **http://localhost:8182** after starting the simulation.
+Open **http://localhost:8182** after starting.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  ⛏ CryptoSim  [MINING]                                          │
-│  difficulty: 0000 — target: 10 blocks                           │
-│                                                                 │
-│  Chain Length: 4   Blocks Mined: 3   Active Miners: 3           │
-│  Difficulty: 4     Target Blocks: 10                            │
-│                                                                 │
-│  ┌──────────────────────────┐  ┌──────────────────────────┐    │
-│  │ Event Log                │  │ Chain                    │    │
-│  │                          │  │                          │    │
-│  │ [10:23:01] miner_1 reg.. │  │ #3  0000c4a1...  miner_2 │    │
-│  │ [10:23:01] miner_2 reg.. │  │ #2  00007f3b...  miner_1 │    │
-│  │ [10:23:03] Block #1 ACC  │  │ #1  0000a3f7...  miner_1 │    │
-│  │ [10:23:06] Block #2 ACC  │  │ #0  Genesis Block        │    │
-│  │ ...                      │  │                          │    │
-│  └──────────────────────────┘  └──────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-```
+**Setup screen** — shown before the simulation starts:
+- Choose how many miners should participate (1–10)
+- Choose the difficulty (3–6)
+- Watch the miner count tick up as containers register
+- Hit **Start** when ready
 
-- **Event Log** — every significant event streams here in real time (no page refresh needed)
-- **Chain panel** — each accepted block appears at the top as it's added
-- **Colour coding** — each miner gets its own colour so you can see who's winning
-- When the simulation finishes, the badge changes from `MINING` to `DONE`
+**Dashboard** — shown during and after the simulation:
+- **Stats bar** — chain length, blocks mined, active miners, difficulty, target, mempool size
+- **Fork banner** — flashes if two miners solve the same block simultaneously
+- **Activity log** — every event streams here live (block accepted, P2P checks, forks, finality)
+- **Chain panel** — each new block appears at the top; finalized blocks get a 🔒
+- **Leaderboard** — ranks miners by RNC balance, showing wallet address and blocks won
+- **Run Another Experiment** — appears when done; resets the simulation without restarting Docker
 
 ---
 
 ## ⚙️ Configuration & tuning
 
-All settings live in the `environment:` section of `docker-compose.yml` under the `node` service:
-
-| Variable | Default | Effect |
+| Variable | Default | What it controls |
 |---|---|---|
-| `DIFFICULTY` | `4` | How many leading zeros the hash must have |
-| `NUM_BLOCKS` | `10` | How many blocks before the simulation ends |
+| `NUM_BLOCKS` | `10` | How many blocks to mine before the simulation ends |
+
+Difficulty and miner count are set live on the dashboard before each run.
 
 ### Difficulty guide
 
-| Difficulty | Leading zeros | Approx. time per block | Good for |
-|---|---|---|---|
-| `3` | `000...` | 0.05 – 0.5 s | Quick smoke test |
-| `4` | `0000...` | 1 – 10 s | **Default — good for watching live** |
-| `5` | `00000...` | 15 – 90 s | Feels closer to real mining |
-| `6` | `000000...` | Several minutes | Stress test |
+| Difficulty | Puzzle size analogy | Approx. time per block |
+|---|---|---|
+| `3` | 10-piece puzzle | Under a second |
+| `4` | 100-piece puzzle | 1–10 seconds |
+| `5` | 1,000-piece puzzle | 15–90 seconds |
+| `6` | 10,000-piece puzzle | Several minutes |
 
-> **Why the range?** SHA-256 is random — sometimes you get lucky and find a valid nonce
-> quickly; sometimes it takes much longer. This is exactly how real Bitcoin works.
-
----
-
-## ➕ Adding more miners
-
-To add a 4th miner, copy the `miner_3` block in `docker-compose.yml` and change
-three things:
-
-```yaml
-  miner_4:                                          # ← new service name
-    build: .
-    command: uvicorn miner:app --host 0.0.0.0 --port 8004 --log-level warning
-    ports:
-      - "8004:8004"                                 # ← new port
-    environment:
-      NODE_URL:   http://node:8182
-      MINER_ID:   miner_4                           # ← new ID
-      MINER_URL:  http://miner_4:8004               # ← new callback URL
-      DIFFICULTY: 4
-    networks:
-      - crypto_net
-    depends_on:
-      - node
-```
-
-That's all — no code changes needed. The node discovers miners dynamically when they register.
+> **Why the range?** SHA-256 is like rolling dice — sometimes you find the answer on the
+> first few tries, sometimes it takes much longer. This randomness is a feature, not a bug.
+> Real Bitcoin uses it to ensure blocks appear roughly every 10 minutes on average.
 
 ---
 
 ## 🛠️ Useful commands
 
 ```bash
-# Start the simulation (rebuild image if files changed)
+# Start everything (rebuilds the image if files changed)
 docker compose up --build
 
-# Start in the background (detached mode)
+# Start in the background
 docker compose up --build -d
 
-# Watch logs for a specific container
-docker compose logs node --follow
-docker compose logs miner_1 --follow
-
-# Watch all container logs at once with colour per service
+# Watch live logs from all containers
 docker compose logs --follow
 
-# Stop all containers (keeps the built image)
+# Watch logs from just the node
+docker compose logs node --follow
+
+# Stop everything
 docker compose down
 
-# Stop and remove the built image too (full clean)
+# Full clean — remove containers and the built image
 docker compose down --rmi all
 
-# Check the full chain JSON (while running)
+# Check the full blockchain as JSON
 curl http://localhost:8182/chain
 
-# Check a miner's health (while running)
-curl http://localhost:8001/health
-curl http://localhost:8002/health
-curl http://localhost:8003/health
+# Check current RNC balances
+curl http://localhost:8182/balances
 
-# Restart just one container without rebuilding
-docker compose restart miner_2
+# Check the mempool
+curl http://localhost:8182/mempool
+
+# Restart just the node (e.g. after a code change copied in)
+docker cp node.py crypto-node-1:/app/node.py && docker restart crypto-node-1
 ```
 
 ---
@@ -509,22 +485,25 @@ docker compose restart miner_2
 
 | Term | Plain-English explanation |
 |---|---|
-| **Block** | A bundle of transactions + metadata. Like a page in a ledger. |
+| **Block** | A bundle of transactions + metadata. Like a page in a public ledger. |
 | **Blockchain** | A list of blocks where each one references the one before it. Tamper-evident. |
-| **Genesis block** | Block #0. The hard-coded starting point of every blockchain. |
-| **Hash** | A fixed-length fingerprint of some data, produced by a mathematical function. Changing even one character in the input produces a completely different hash. |
-| **SHA-256** | The specific hash function used by Bitcoin (and this simulation). Always produces a 64-character hex string. |
-| **Nonce** | "Number used once." The value miners iterate over when searching for a valid hash. |
-| **Proof-of-Work (PoW)** | The puzzle miners solve. Proves they spent real computational effort. |
-| **Difficulty** | How hard the puzzle is. Higher difficulty = hash must start with more zeros = harder. |
-| **Mining** | The process of searching for a nonce that produces a hash meeting the difficulty target. |
+| **Genesis block** | Block #0 — the hard-coded starting point of every blockchain. |
+| **Hash / fingerprint** | A fixed-length summary of some data. Change even one character in the input and the hash changes completely. |
+| **SHA-256** | The specific hash function used here and in Bitcoin. Always produces a 64-character hex string. |
+| **Nonce** | "Number used once." The value miners keep changing until the hash meets the target. |
+| **Proof-of-Work** | The puzzle miners must solve. Proves they spent real computational effort. |
+| **Difficulty** | How hard the puzzle is. Higher = hash must start with more zeros. |
+| **Mining** | Searching for a nonce that makes the hash meet the difficulty target. |
 | **Chain tip** | The most recently added block. Miners always build on top of this. |
-| **previous_hash** | The hash of the preceding block, stored inside the current block. This is what "chains" the blocks together. |
-| **SSE** | Server-Sent Events. A web standard for the server to push data to the browser over a persistent HTTP connection. |
-| **FastAPI** | A Python web framework for building HTTP APIs quickly. |
-| **uvicorn** | The ASGI server that runs FastAPI apps. Handles the actual TCP connections. |
-| **Docker** | Software that packages an application and all its dependencies into an isolated "container." |
-| **Docker Compose** | A tool to define and run multiple Docker containers together. |
-| **Bridge network** | A private Docker network. Containers on it can reach each other by service name. |
-| **Stale block** | A solved block that arrived at the node after another miner already won the same block height. Rejected with 409. |
-| **ASGI** | Async Server Gateway Interface. The protocol FastAPI uses to handle concurrent requests. |
+| **RennCoin (RNC)** | The simulated cryptocurrency. 50 RNC is paid to the miner who wins each block. |
+| **Coinbase transaction** | The reward transaction in every block. No sender — new coins come from nowhere, like a mint printing money. |
+| **Wallet** | A cryptographic key pair. Private key = PIN, public key = signature, address = account number. |
+| **ECDSA** | Elliptic Curve Digital Signature Algorithm — the maths behind signing transactions. Same curve as Bitcoin. |
+| **Mempool** | Memory pool — a waiting room for transactions not yet included in a block. |
+| **Fork** | When two miners solve the same height simultaneously. One block wins, the other is orphaned. |
+| **Finality** | A block is "final" (safe) when 2 more blocks have been built on top of it. Like concrete setting. |
+| **P2P validation** | After a block is accepted, 2 other miners independently verify it — no single point of trust. |
+| **SSE** | Server-Sent Events — how the server pushes live updates to your browser without refreshing. |
+| **Docker** | Software that packages an app and all its dependencies into an isolated container. |
+| **Docker Compose** | A tool to run multiple containers together as one application. |
+| **Stale block** | A solved block that arrived after another miner already won the same height. Rejected. |

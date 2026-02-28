@@ -3,10 +3,10 @@
 #
 # Services:
 #   node       — Blockchain authority + live web dashboard  (localhost:8182)
-#   miner_1…10 — Up to 10 mining containers (ports 8001-8010)
+#   miner_1…10 — Up to 10 mining containers (ports 8183-8192)
 #
 # All services share the 'crypto_net' bridge network so they reach each
-# other by Docker service name  (e.g. http://node:8182, http://miner_1:8001).
+# other by Docker service name  (e.g. http://node:8182, http://miner_1:8183).
 #
 # The number of miners and difficulty are chosen at runtime through the
 # web dashboard at http://localhost:8182 — no need to edit this file.
@@ -41,13 +41,13 @@ services:
   # ---------- Miners 1-10 --------------------------------------------------
   miner_1:
     build: .
-    command: uvicorn miner:app --host 0.0.0.0 --port 8001 --log-level warning
+    command: uvicorn miner:app --host 0.0.0.0 --port 8183 --log-level warning
     ports:
-      - "8001:8001"
+      - "8183:8183"
     environment:
       NODE_URL:   http://node:8182
       MINER_ID:   miner_1
-      MINER_URL:  http://miner_1:8001
+      MINER_URL:  http://miner_1:8183
     networks:
       - crypto_net
     depends_on:
@@ -55,13 +55,13 @@ services:
 
   miner_2:
     build: .
-    command: uvicorn miner:app --host 0.0.0.0 --port 8002 --log-level warning
+    command: uvicorn miner:app --host 0.0.0.0 --port 8184 --log-level warning
     ports:
-      - "8002:8002"
+      - "8184:8184"
     environment:
       NODE_URL:   http://node:8182
       MINER_ID:   miner_2
-      MINER_URL:  http://miner_2:8002
+      MINER_URL:  http://miner_2:8184
     networks:
       - crypto_net
     depends_on:
@@ -69,13 +69,13 @@ services:
 
   miner_3:
     build: .
-    command: uvicorn miner:app --host 0.0.0.0 --port 8003 --log-level warning
+    command: uvicorn miner:app --host 0.0.0.0 --port 8185 --log-level warning
     ports:
-      - "8003:8003"
+      - "8185:8185"
     environment:
       NODE_URL:   http://node:8182
       MINER_ID:   miner_3
-      MINER_URL:  http://miner_3:8003
+      MINER_URL:  http://miner_3:8185
     networks:
       - crypto_net
     depends_on:
@@ -83,13 +83,13 @@ services:
 
   miner_4:
     build: .
-    command: uvicorn miner:app --host 0.0.0.0 --port 8004 --log-level warning
+    command: uvicorn miner:app --host 0.0.0.0 --port 8186 --log-level warning
     ports:
-      - "8004:8004"
+      - "8186:8186"
     environment:
       NODE_URL:   http://node:8182
       MINER_ID:   miner_4
-      MINER_URL:  http://miner_4:8004
+      MINER_URL:  http://miner_4:8186
     networks:
       - crypto_net
     depends_on:
@@ -97,13 +97,13 @@ services:
 
   miner_5:
     build: .
-    command: uvicorn miner:app --host 0.0.0.0 --port 8005 --log-level warning
+    command: uvicorn miner:app --host 0.0.0.0 --port 8187 --log-level warning
     ports:
-      - "8005:8005"
+      - "8187:8187"
     environment:
       NODE_URL:   http://node:8182
       MINER_ID:   miner_5
-      MINER_URL:  http://miner_5:8005
+      MINER_URL:  http://miner_5:8187
     networks:
       - crypto_net
     depends_on:
@@ -111,13 +111,13 @@ services:
 
   miner_6:
     build: .
-    command: uvicorn miner:app --host 0.0.0.0 --port 8006 --log-level warning
+    command: uvicorn miner:app --host 0.0.0.0 --port 8188 --log-level warning
     ports:
-      - "8006:8006"
+      - "8188:8188"
     environment:
       NODE_URL:   http://node:8182
       MINER_ID:   miner_6
-      MINER_URL:  http://miner_6:8006
+      MINER_URL:  http://miner_6:8188
     networks:
       - crypto_net
     depends_on:
@@ -125,13 +125,13 @@ services:
 
   miner_7:
     build: .
-    command: uvicorn miner:app --host 0.0.0.0 --port 8007 --log-level warning
+    command: uvicorn miner:app --host 0.0.0.0 --port 8189 --log-level warning
     ports:
-      - "8007:8007"
+      - "8189:8189"
     environment:
       NODE_URL:   http://node:8182
       MINER_ID:   miner_7
-      MINER_URL:  http://miner_7:8007
+      MINER_URL:  http://miner_7:8189
     networks:
       - crypto_net
     depends_on:
@@ -139,13 +139,13 @@ services:
 
   miner_8:
     build: .
-    command: uvicorn miner:app --host 0.0.0.0 --port 8008 --log-level warning
+    command: uvicorn miner:app --host 0.0.0.0 --port 8190 --log-level warning
     ports:
-      - "8008:8008"
+      - "8190:8190"
     environment:
       NODE_URL:   http://node:8182
       MINER_ID:   miner_8
-      MINER_URL:  http://miner_8:8008
+      MINER_URL:  http://miner_8:8190
     networks:
       - crypto_net
     depends_on:
@@ -153,13 +153,13 @@ services:
 
   miner_9:
     build: .
-    command: uvicorn miner:app --host 0.0.0.0 --port 8009 --log-level warning
+    command: uvicorn miner:app --host 0.0.0.0 --port 8191 --log-level warning
     ports:
-      - "8009:8009"
+      - "8191:8191"
     environment:
       NODE_URL:   http://node:8182
       MINER_ID:   miner_9
-      MINER_URL:  http://miner_9:8009
+      MINER_URL:  http://miner_9:8191
     networks:
       - crypto_net
     depends_on:
@@ -167,13 +167,13 @@ services:
 
   miner_10:
     build: .
-    command: uvicorn miner:app --host 0.0.0.0 --port 8010 --log-level warning
+    command: uvicorn miner:app --host 0.0.0.0 --port 8192 --log-level warning
     ports:
-      - "8010:8010"
+      - "8192:8192"
     environment:
       NODE_URL:   http://node:8182
       MINER_ID:   miner_10
-      MINER_URL:  http://miner_10:8010
+      MINER_URL:  http://miner_10:8192
     networks:
       - crypto_net
     depends_on:

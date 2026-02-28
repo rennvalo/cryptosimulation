@@ -20,6 +20,11 @@ from block import Block
 logger = logging.getLogger(__name__)
 
 
+# Finality depth: a block is considered confirmed once this many blocks
+# have been built on top of it. 2 mirrors a common educational minimum.
+CONFIRMATION_DEPTH = 2
+
+
 class Blockchain:
     """
     Maintains an ordered list of Blocks linked by previous_hash.
@@ -33,6 +38,9 @@ class Blockchain:
     def __init__(self, difficulty: int = 4) -> None:
         self.difficulty: int = difficulty   # Leading zeros required in hash
         self.chain: list[Block] = []
+        # Fork event log: list of dicts recorded whenever a competing block
+        # arrives at a height that was already filled on the canonical chain.
+        self.fork_events: list[dict] = []
         self._create_genesis_block()
 
     # ------------------------------------------------------------------
@@ -143,10 +151,87 @@ class Blockchain:
     # Serialization
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Finality
+    # ------------------------------------------------------------------
+
+    @property
+    def confirmed_height(self) -> int:
+        """
+        The index of the highest block that has reached finality.
+
+        A block is considered final once CONFIRMATION_DEPTH additional blocks
+        have been appended on top of it.  Blocks at or below confirmed_height
+        will never be reorganised away in this simulation.
+
+        Returns -1 when no non-genesis blocks have been confirmed yet.
+        """
+        # chain length includes genesis (index 0), tip index = len-1
+        tip_index = len(self.chain) - 1
+        confirmed = tip_index - CONFIRMATION_DEPTH
+        return confirmed  # may be negative; callers should clamp at 0
+
+    # ------------------------------------------------------------------
+    # Balances
+    # ------------------------------------------------------------------
+
+    def compute_balances(self) -> dict[str, float]:
+        """
+        Walk all confirmed blocks and sum RennCoin earned by each wallet address.
+
+        Only coinbase transactions (from_addr == "COINBASE") are counted here;
+        peer transfers would also appear once the full UTXO model is wired up.
+        Only confirmed blocks (index <= confirmed_height) are included so that
+        unconfirmed rewards cannot be spent.
+        """
+        max_index = max(0, self.confirmed_height)
+        balances: dict[str, float] = {}
+        for block in self.chain:
+            if block.index > max_index:
+                break
+            for tx in block.transactions:
+                # Transactions are stored as dicts when serialised over HTTP
+                if isinstance(tx, dict) and tx.get("from_addr") == "COINBASE":
+                    addr   = tx["to_addr"]
+                    amount = float(tx.get("amount", 0))
+                    balances[addr] = round(balances.get(addr, 0.0) + amount, 4)
+        return balances
+
+    # ------------------------------------------------------------------
+    # Fork recording
+    # ------------------------------------------------------------------
+
+    def record_fork(
+        self, height: int, canonical_miner: str, fork_miner: str
+    ) -> dict:
+        """
+        Log a fork event — two miners submitted valid blocks at the same height.
+        The canonical chain keeps the first-accepted block; the competing block
+        becomes an orphan.  This mirrors Bitcoin's natural fork resolution where
+        the longest chain always wins.
+        """
+        event = {
+            "height":           height,
+            "canonical_miner":  canonical_miner,
+            "fork_miner":       fork_miner,
+        }
+        self.fork_events.append(event)
+        logger.info(
+            "Fork recorded at height %d: canonical=%s orphan=%s",
+            height, canonical_miner, fork_miner,
+        )
+        return event
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
     def to_dict(self) -> dict:
         """Serialize the full chain to a JSON-compatible dict."""
         return {
-            "difficulty": self.difficulty,
-            "length":     len(self.chain),
-            "chain":      [b.to_dict() for b in self.chain],
+            "difficulty":    self.difficulty,
+            "length":        len(self.chain),
+            "chain":         [b.to_dict() for b in self.chain],
+            "confirmed_height": max(0, self.confirmed_height),
+            "fork_events":   self.fork_events,
         }

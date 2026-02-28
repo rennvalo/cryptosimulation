@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -30,6 +31,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from block import Block
 from blockchain import Blockchain
+from transaction import Transaction
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -64,6 +66,12 @@ _registered_order: list[str] = []     # insertion-order list of miner IDs
 # miner_id → callback URL  (e.g. "miner_1" → "http://miner_1:8001")
 miner_registry: dict[str, str] = {}
 
+# miner_id → wallet address (populated when miners register with their address)
+miner_addresses: dict[str, str] = {}
+
+# Pending RennCoin transaction pool (filled by background generator)
+_mempool: list[dict] = []
+
 # Each connected SSE browser client gets its own Queue
 _sse_clients: list[asyncio.Queue] = []
 
@@ -75,6 +83,12 @@ _chain_lock = asyncio.Lock()
 
 simulation_done = False
 
+# Index of the highest confirmed block (-1 = none confirmed yet)
+_finalized_height: int = -1
+
+# Fork detection: height → (canonical_miner_id, accepted_unix_timestamp)
+_recent_accepted: dict[int, tuple[str, float]] = {}
+
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
@@ -85,7 +99,9 @@ async def lifespan(app: FastAPI):
     logger.info(
         "Node started — difficulty=%d, target_blocks=%d", DIFFICULTY, NUM_BLOCKS
     )
+    mempool_task = asyncio.create_task(_mempool_generator())
     yield
+    mempool_task.cancel()
     logger.info("Node shutting down")
 
 
@@ -128,10 +144,6 @@ async def broadcast_block_to_miners(block: Block) -> None:
     This mirrors Bitcoin's block propagation: when the network accepts a
     block, all nodes (miners) receive it immediately so they can abandon
     their current nonce search and start working on the next block height.
-
-    We use httpx.AsyncClient for non-blocking async HTTP calls so this
-    function does not stall the FastAPI event loop while waiting for each
-    miner to respond.
     """
     payload = block.to_dict()
     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -143,6 +155,83 @@ async def broadcast_block_to_miners(block: Block) -> None:
                 logger.warning(
                     "Failed to push block #%d to %s: %s", block.index, miner_id, exc
                 )
+
+
+async def _peer_validate_block(block: Block, winner_id: str) -> None:
+    """
+    Ask up to 2 non-winning active miners to independently validate the
+    accepted block.  Simulates Bitcoin's decentralised peer validation where
+    every full node re-verifies every block it receives from the network.
+    """
+    validators = [mid for mid in active_miner_ids if mid != winner_id][:2]
+    if not validators:
+        return
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for vid in validators:
+            url = miner_registry.get(vid)
+            if not url:
+                continue
+            try:
+                resp = await client.post(
+                    f"{url}/validate_block", json=block.to_dict()
+                )
+                result = resp.json()
+                valid = result.get("valid", False)
+                check = "\u2713" if valid else "\u2717"
+                await log_event(
+                    f"P2P validation: {vid} verified block #{block.index} → {check}"
+                )
+                for q in list(_sse_clients):
+                    try:
+                        q.put_nowait({
+                            "type": "peer_validated",
+                            "data": {
+                                "block_index": block.index,
+                                "validator":   vid,
+                                "valid":       valid,
+                            },
+                        })
+                    except asyncio.QueueFull:
+                        pass
+            except Exception as exc:
+                logger.warning("Peer validation request to %s failed: %s", vid, exc)
+
+
+async def _mempool_generator() -> None:
+    """
+    Background task: periodically create simulated RennCoin transfer
+    transactions between random miner wallets and add them to the mempool.
+    Mirrors a real blockchain's flow of user transactions waiting to be
+    picked up and included by miners.
+    """
+    while True:
+        await asyncio.sleep(random.uniform(5, 12))
+        if not started or len(miner_addresses) < 2:
+            continue
+        addrs = list(miner_addresses.items())          # [(miner_id, address), ...]
+        from_id, from_addr = random.choice(addrs)
+        to_candidates = [(mid, addr) for mid, addr in addrs if mid != from_id]
+        if not to_candidates:
+            continue
+        _, to_addr = random.choice(to_candidates)
+        amount = round(random.uniform(1.0, 10.0), 2)
+        tx = Transaction.transfer(
+            from_addr=from_addr,
+            to_addr=to_addr,
+            amount=amount,
+            signature="simulated",
+        ).to_dict()
+        _mempool.append(tx)
+        if len(_mempool) > 50:
+            _mempool.pop(0)
+        await log_event(
+            f"Mempool: +tx  {amount} RNC  {from_addr[:8]}\u2026 → {to_addr[:8]}\u2026"
+        )
+        for q in list(_sse_clients):
+            try:
+                q.put_nowait({"type": "mempool_update", "data": {"count": len(_mempool)}})
+            except asyncio.QueueFull:
+                pass
 
 
 async def signal_shutdown_to_miners() -> None:
@@ -187,8 +276,11 @@ async def register_miner(payload: dict) -> dict:
     """
     miner_id = payload["miner_id"]
     callback_url = payload["callback_url"]
+    address    = payload.get("address", "")
 
     miner_registry[miner_id] = callback_url
+    if address:
+        miner_addresses[miner_id] = address
     if miner_id not in _registered_order:
         _registered_order.append(miner_id)
 
@@ -254,10 +346,27 @@ async def submit_block(payload: dict) -> JSONResponse:
     async with _chain_lock:
         # Stale check — another miner already won this block height
         if block.index != blockchain.last_block.index + 1:
-            await log_event(
-                f"Stale block #{block.index} from {miner_id} — "
-                f"chain already at #{blockchain.last_block.index}"
-            )
+            # Detect near-simultaneous forks (within 2 s of canonical acceptance)
+            prior = _recent_accepted.get(block.index)
+            if prior and (time.time() - prior[1]) < 2.0:
+                canonical_miner = prior[0]
+                fork_event = blockchain.record_fork(
+                    block.index, canonical_miner, miner_id
+                )
+                await log_event(
+                    f"\u26a1 FORK at block #{block.index}!  "
+                    f"Canonical: {canonical_miner}  |  Orphaned: {miner_id}"
+                )
+                for q in list(_sse_clients):
+                    try:
+                        q.put_nowait({"type": "fork", "data": fork_event})
+                    except asyncio.QueueFull:
+                        pass
+            else:
+                await log_event(
+                    f"Stale block #{block.index} from {miner_id} — "
+                    f"chain already at #{blockchain.last_block.index}"
+                )
             return JSONResponse(
                 status_code=409,
                 content={"status": "stale", "chain_tip": blockchain.last_block.index},
@@ -277,6 +386,13 @@ async def submit_block(payload: dict) -> JSONResponse:
 
         # All checks passed — append to the canonical chain
         blockchain.append_block(block)
+        _recent_accepted[block.index] = (miner_id, time.time())
+
+    # Remove transactions included in this block from the mempool
+    block_tx_ids = {
+        tx.get("tx_id") for tx in block.transactions if isinstance(tx, dict)
+    }
+    _mempool[:] = [tx for tx in _mempool if tx.get("tx_id") not in block_tx_ids]
 
     # Log the win (outside the lock — non-mutating)
     await log_event(
@@ -298,6 +414,28 @@ async def submit_block(payload: dict) -> JSONResponse:
             q.put_nowait({"type": "block", "data": block_event})
         except asyncio.QueueFull:
             pass
+
+    # Check finality advancement
+    global _finalized_height
+    new_confirmed = blockchain.confirmed_height
+    if new_confirmed > _finalized_height and new_confirmed >= 0:
+        _finalized_height = new_confirmed
+        await log_event(f"\U0001f512 Block #{new_confirmed} FINALIZED (2-block confirmation depth)")
+        for q in list(_sse_clients):
+            try:
+                q.put_nowait({"type": "finalized", "data": {"height": new_confirmed}})
+            except asyncio.QueueFull:
+                pass
+        # Also send updated balances so leaderboard updates immediately
+        balances = blockchain.compute_balances()
+        for q in list(_sse_clients):
+            try:
+                q.put_nowait({"type": "balance_update", "data": balances})
+            except asyncio.QueueFull:
+                pass
+
+    # Kick off P2P validation and broadcast in the background
+    asyncio.create_task(_peer_validate_block(block, miner_id))
 
     # Check simulation target
     if blockchain.last_block.index >= NUM_BLOCKS:
@@ -324,6 +462,30 @@ async def get_chain() -> dict:
     if blockchain is None:
         return {"chain": [], "length": 0}
     return blockchain.to_dict()
+
+
+@app.get("/mempool")
+async def get_mempool() -> dict:
+    """
+    Return up to 10 pending transactions from the mempool.
+    Miners call this before each PoW round to include real pending
+    transactions in their candidate block.
+    """
+    return {"transactions": _mempool[:10], "count": len(_mempool)}
+
+
+@app.get("/balances")
+async def get_balances() -> dict:
+    """
+    Return confirmed RennCoin balances for all wallet addresses.
+    Only includes blocks that have reached 2-confirmation finality.
+    """
+    if blockchain is None:
+        return {"balances": {}, "miner_addresses": {}}
+    return {
+        "balances":        blockchain.compute_balances(),
+        "miner_addresses": miner_addresses,
+    }
 
 
 @app.get("/config")
@@ -400,6 +562,45 @@ async def start_simulation(payload: dict) -> JSONResponse:
     )
 
     return JSONResponse(status_code=200, content={"status": "started", **start_data})
+
+
+@app.post("/reset")
+async def reset_simulation() -> JSONResponse:
+    """
+    Called by the dashboard 'Run Another Experiment' button.
+    Resets all per-simulation state so a fresh run can be configured.
+    Miners are notified via POST /reset so they re-enter the wait loop
+    without needing a container restart.
+    """
+    global started, blockchain, simulation_done, active_miner_ids
+    global _mempool, _finalized_height, _recent_accepted
+
+    started           = False
+    blockchain        = None
+    simulation_done   = False
+    active_miner_ids  = []
+    _mempool          = []
+    _finalized_height = -1
+    _recent_accepted  = {}
+    _event_log.clear()
+
+    # Tell every known miner to stop and re-enter the activation-wait loop
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for miner_id, url in list(miner_registry.items()):
+            try:
+                await client.post(f"{url}/reset")
+            except Exception as exc:
+                logger.warning("Failed to reset miner %s: %s", miner_id, exc)
+
+    # Broadcast reset to all connected browsers
+    for q in list(_sse_clients):
+        try:
+            q.put_nowait({"type": "reset", "data": "Simulation reset"})
+        except asyncio.QueueFull:
+            pass
+
+    logger.info("=== Simulation reset — ready for new experiment ===")
+    return JSONResponse(status_code=200, content={"status": "reset"})
 
 
 @app.get("/events")
@@ -480,6 +681,58 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
     }}
     h1 {{ color: #f0883e; margin-bottom: 6px; font-size: 1.6rem; }}
     .subtitle {{ color: #8b949e; margin-bottom: 24px; font-size: 0.85rem; }}
+
+    /* ── Fork banner ──────────────────────────────────────────────────── */
+    #fork-banner {{
+      display: none;
+      background: #2d1a00;
+      border: 1px solid #f0883e;
+      border-radius: 8px;
+      padding: 10px 18px;
+      margin-bottom: 18px;
+      font-size: 0.85rem;
+      color: #f0883e;
+      animation: fadeIn 0.3s ease;
+    }}
+    /* ── Lock icon for finalized blocks ───────────────────────────────── */
+    .lock-icon {{
+      color: #f0c040;
+      font-size: 0.88rem;
+      margin-left: 6px;
+      title: 'Finalized';
+    }}
+    /* ── RennCoin leaderboard ─────────────────────────────────────────── */
+    .leaderboard-section {{
+      margin-top: 20px;
+    }}
+    .leaderboard-section h2 {{
+      color: #58a6ff;
+      font-size: 1rem;
+      margin-bottom: 12px;
+      border-bottom: 1px solid #21262d;
+      padding-bottom: 8px;
+    }}
+    .leaderboard {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }}
+    .leaderboard th {{
+      color: #8b949e;
+      text-align: left;
+      padding: 6px 12px;
+      border-bottom: 1px solid #21262d;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }}
+    .leaderboard td {{
+      padding: 8px 12px;
+      border-bottom: 1px solid #161b22;
+    }}
+    .leaderboard tr:hover td {{ background: #161b22; }}
+    .leaderboard .rnc-balance {{ color: #f0883e; font-weight: bold; }}
+    .leaderboard .addr {{ color: #8b949e; font-size: 0.72rem; font-family: monospace; }}
 
     /* ── Setup screen ─────────────────────────────────────────────────── */
     #setup-screen {{
@@ -617,6 +870,21 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
       color: #3fb950;
       border-color: #2ea043;
     }}
+    #btn-new-experiment {{
+      display: none;
+      margin-top: 0.75rem;
+      padding: 0.5rem 1.4rem;
+      background: #238636;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }}
+    #btn-new-experiment:hover {{ background: #2ea043; }}
+    #btn-new-experiment:disabled {{ opacity: 0.6; cursor: default; }}
     #log {{
       height: 360px;
       overflow-y: auto;
@@ -697,6 +965,14 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
   <div id="dashboard-screen" style="display:none">
     <h1>&#x26CF; CryptoSim <span id="status-badge">MINING</span></h1>
     <p class="subtitle" id="dash-subtitle">Bitcoin-style proof-of-work simulation</p>
+    <button id="btn-new-experiment" onclick="resetSimulation()">&#x1F504; Run Another Experiment</button>
+
+    <!-- Fork alert banner (hidden until a fork is detected) -->
+    <div id="fork-banner">
+      &#x26A1; Fork at block #<strong id="fork-height"></strong>!
+      &nbsp; Canonical: <strong id="fork-canonical"></strong>
+      &nbsp; Orphaned: <strong id="fork-orphan"></strong>
+    </div>
 
     <div class="stats">
       <div class="stat-box">
@@ -719,6 +995,10 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
         <div class="stat-label">Target Blocks</div>
         <div class="stat-value" id="stat-target">-</div>
       </div>
+      <div class="stat-box">
+        <div class="stat-label">Mempool</div>
+        <div class="stat-value" id="stat-mempool">0</div>
+      </div>
     </div>
 
     <div class="grid">
@@ -729,13 +1009,32 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
       <div class="panel">
         <h2>Chain</h2>
         <div id="chain-display">
-          <div class="block-card">
+          <div class="block-card" data-index="0">
             <span class="block-index">#0</span>
             <span class="block-hash">Genesis Block</span>
             <span class="block-meta">NODE<br/>t=0.00s</span>
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- RennCoin leaderboard -->
+    <div class="leaderboard-section panel" style="margin-top:20px">
+      <h2>&#x1F4B0; RennCoin Leaderboard&nbsp;<small style="color:#8b949e;font-size:0.75rem">(confirmed balances)</small></h2>
+      <table class="leaderboard">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Miner</th>
+            <th>Wallet Address</th>
+            <th>Balance (RNC)</th>
+            <th>Blocks Won</th>
+          </tr>
+        </thead>
+        <tbody id="leaderboard-body">
+          <tr><td colspan="5" style="color:#6e7681;text-align:center;padding:16px">Waiting for first confirmed block&hellip;</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
@@ -754,6 +1053,10 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
     const logEl   = document.getElementById('log');
     const chainEl = document.getElementById('chain-display');
     let minedCount = 0;
+    const blockCounts   = {{}}; // miner_id  → blocks won
+    const latestBalances = {{}}; // address   → confirmed RNC balance
+    // miner_id → wallet address (populated from /balances or balance_update events)
+    const minerAddrs = {{}};
 
     function appendLog(text) {{
       const div = document.createElement('div');
@@ -770,9 +1073,11 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
       minedCount++;
       document.getElementById('stat-length').textContent = data.index + 1;
       document.getElementById('stat-mined').textContent  = minedCount;
+      blockCounts[data.miner] = (blockCounts[data.miner] || 0) + 1;
       const cc = colorClass(data.miner);
       const card = document.createElement('div');
       card.className = 'block-card';
+      card.dataset.index = data.index;
       card.innerHTML = `
         <span class="block-index">#${{data.index}}</span>
         <span class="block-hash ${{cc}}">${{data.hash}}</span>
@@ -781,18 +1086,84 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
           nonce:${{data.nonce.toLocaleString()}} &nbsp; ${{data.time}}s
         </span>`;
       chainEl.insertBefore(card, chainEl.firstChild);
+      updateLeaderboard();
     }}
 
     /** Transition from setup screen to dashboard. */
+    async function resetSimulation() {{
+      const btn = document.getElementById('btn-new-experiment');
+      btn.disabled = true;
+      btn.textContent = 'Resetting…';
+      try {{ await fetch('/reset', {{method: 'POST'}}); }} catch(e) {{}}
+      window.location.reload();
+    }}
+
     function showDashboard(cfg) {{
       document.getElementById('setup-screen').style.display   = 'none';
       document.getElementById('dashboard-screen').style.display = '';
       const target = '0'.repeat(cfg.difficulty);
       document.getElementById('dash-subtitle').textContent =
-        `Bitcoin-style proof-of-work simulation — difficulty: ${{target}} — target: ${{cfg.target ?? cfg.num_blocks}} blocks`;
+        `RennCoin proof-of-work simulation — difficulty: ${{target}} — target: ${{cfg.target ?? cfg.num_blocks}} blocks`;
       document.getElementById('stat-diff').textContent   = cfg.difficulty;
       document.getElementById('stat-target').textContent = cfg.target ?? cfg.num_blocks;
       document.getElementById('stat-miners').textContent = cfg.num_miners ?? (cfg.active ? cfg.active.length : '-');
+    }}
+
+    /** Flash the fork banner for 6 seconds. */
+    function flashFork(data) {{
+      document.getElementById('fork-height').textContent    = data.height;
+      document.getElementById('fork-canonical').textContent = data.canonical_miner;
+      document.getElementById('fork-orphan').textContent    = data.fork_miner;
+      const banner = document.getElementById('fork-banner');
+      banner.style.display = 'block';
+      setTimeout(() => {{ banner.style.display = 'none'; }}, 6000);
+    }}
+
+    /** Add a lock icon to all block cards at or below the finalized height. */
+    function markFinalized(height) {{
+      document.querySelectorAll('.block-card[data-index]').forEach(card => {{
+        if (parseInt(card.dataset.index) <= height) {{
+          if (!card.querySelector('.lock-icon')) {{
+            const lock = document.createElement('span');
+            lock.className = 'lock-icon';
+            lock.title = 'Finalized';
+            lock.textContent = '🔒';
+            const idxEl = card.querySelector('.block-index');
+            if (idxEl) idxEl.appendChild(lock);
+          }}
+        }}
+      }});
+    }}
+
+    /** Rebuild the RennCoin leaderboard table. */
+    function updateLeaderboard() {{
+      const tbody = document.getElementById('leaderboard-body');
+      if (!tbody) return;
+      const miners = Object.keys(blockCounts);
+      if (miners.length === 0) return;
+      miners.sort((a, b) => {{
+        const addrA = minerAddrs[a] || '';
+        const addrB = minerAddrs[b] || '';
+        const balA  = latestBalances[addrA] || 0;
+        const balB  = latestBalances[addrB] || 0;
+        if (balB !== balA) return balB - balA;
+        return (blockCounts[b] || 0) - (blockCounts[a] || 0);
+      }});
+      tbody.innerHTML = miners.map((mid, i) => {{
+        const addr = minerAddrs[mid] || '—';
+        const bal  = latestBalances[addr] !== undefined
+          ? latestBalances[addr].toFixed(2) : '0.00';
+        const won  = blockCounts[mid] || 0;
+        const cc   = colorClass(mid);
+        const addrDisplay = addr.length > 16 ? addr.slice(0,8)+'…'+addr.slice(-6) : addr;
+        return `<tr>
+          <td>${{i+1}}</td>
+          <td><span class="${{cc}}">${{mid}}</span></td>
+          <td class="addr">${{addrDisplay}}</td>
+          <td class="rnc-balance">${{bal}} RNC</td>
+          <td>${{won}}</td>
+        </tr>`;
+      }}).join('');
     }}
 
     // ── On page load: check current state ────────────────────────────────
@@ -811,12 +1182,26 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
             document.getElementById('stat-mined').textContent  = minedCount;
             const card = document.createElement('div');
             card.className = 'block-card';
+            card.dataset.index = b.index;
             card.innerHTML = `
               <span class="block-index">#${{b.index}}</span>
               <span class="block-hash">${{b.hash.slice(0,16)}}...</span>
               <span class="block-meta">reloaded</span>`;
             chainEl.appendChild(card);
           }});
+          // Seed leaderboard with confirmed balances
+          try {{
+            const bals = await fetch('/balances').then(r => r.json());
+            if (bals.miner_addresses) {{
+              Object.assign(minerAddrs, bals.miner_addresses);
+            }}
+            if (bals.balances) {{
+              Object.assign(latestBalances, bals.balances);
+            }}
+            // Mark any already-finalized blocks
+            if (chain.confirmed_height > 0) markFinalized(chain.confirmed_height);
+            updateLeaderboard();
+          }} catch(e) {{ console.warn('Balances fetch failed', e); }}
         }}
       }} catch(e) {{ console.warn('Config fetch failed', e); }}
     }})();
@@ -858,7 +1243,10 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
     }});
 
     es.addEventListener('started', (e) => {{
-      showDashboard(JSON.parse(e.data));
+      const cfg = JSON.parse(e.data);
+      showDashboard(cfg);
+      // Store miner addresses if provided
+      if (cfg.miner_addresses) Object.assign(minerAddrs, cfg.miner_addresses);
     }});
 
     es.addEventListener('log', (e) => {{
@@ -875,6 +1263,34 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
       badge.textContent = 'DONE';
       badge.className   = 'done';
       es.close();
+      document.getElementById('btn-new-experiment').style.display = 'inline-block';
+    }});
+
+    es.addEventListener('fork', (e) => {{
+      flashFork(JSON.parse(e.data));
+    }});
+
+    es.addEventListener('finalized', (e) => {{
+      const {{height}} = JSON.parse(e.data);
+      markFinalized(height);
+    }});
+
+    es.addEventListener('balance_update', (e) => {{
+      const balances = JSON.parse(e.data);
+      Object.assign(latestBalances, balances);
+      updateLeaderboard();
+    }});
+
+    es.addEventListener('mempool_update', (e) => {{
+      const {{count}} = JSON.parse(e.data);
+      const el = document.getElementById('stat-mempool');
+      if (el) el.textContent = count;
+    }});
+
+    es.addEventListener('peer_validated', (e) => {{
+      const d = JSON.parse(e.data);
+      const check = d.valid ? '✓' : '✗';
+      appendLog(`[P2P] ${{d.validator}} verified block #${{d.block_index}} ${{check}}`);
     }});
 
     es.onerror = () => {{

@@ -2,28 +2,28 @@
 miner.py — A miner container.
 
 Each miner:
-  1. On startup, registers with the node via POST /register to get the
-     current chain tip (so it knows which block to build on top of).
-  2. Runs a background OS thread that repeatedly increments a nonce,
+  1. On startup, generates a RennCoin wallet (ECDSA keypair on secp256k1).
+  2. Registers with the node via POST /register, sending its wallet address
+     so the node can direct coinbase rewards to it.
+  3. Polls GET /config until the user clicks Start on the dashboard.
+  4. Runs a background OS thread that repeatedly increments a nonce,
      SHA-256-hashes the candidate block, and checks the difficulty target.
-  3. Exposes POST /new_block so the node can PUSH accepted blocks,
+  5. Each candidate block starts with a coinbase transaction (50 RennCoin
+     reward to this miner's wallet) followed by up to 5 mempool transactions
+     fetched from the node before each PoW round.
+  6. Exposes POST /new_block so the node can PUSH accepted blocks,
      causing the mining thread to abandon its current nonce search and
      immediately begin mining the next block height.
-  4. Exposes POST /shutdown so the node can stop the miner cleanly once
+  7. Exposes POST /validate_block so the node can request peer validation
+     of a newly accepted block (simulates Bitcoin's decentralised validation).
+  8. Exposes POST /shutdown so the node can stop the miner cleanly once
      the simulation target block count is reached.
-
-Why a background thread and not asyncio?
-  The proof-of-work loop is pure CPU work (tight loop, no I/O).  Running
-  it in an asyncio coroutine would starve the FastAPI event loop because
-  Python coroutines are cooperative — a tight loop never yields.  A
-  threading.Thread gives the OS scheduler true pre-emptive control so
-  the HTTP routes remain responsive while mining is in progress.
 
 Environment variables:
   NODE_URL    Base URL of the node       (default: http://node:8182)
   MINER_ID    Human-readable name        (default: miner_unknown)
   MINER_URL   This container's callback  (default: http://miner_1:8001)
-  DIFFICULTY  Leading-zero target        (default: 4)
+  WALLET_KEY  Hex private key to restore  (default: auto-generated)
 """
 
 import logging
@@ -37,6 +37,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from block import Block
+from transaction import Transaction
+from wallet import Wallet
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -45,7 +47,10 @@ from block import Block
 NODE_URL   = os.environ.get("NODE_URL",   "http://node:8182")
 MINER_ID   = os.environ.get("MINER_ID",   "miner_unknown")
 MINER_URL  = os.environ.get("MINER_URL",  "http://miner_1:8001")
-DIFFICULTY = int(os.environ.get("DIFFICULTY", 4))
+WALLET_KEY = os.environ.get("WALLET_KEY") or None  # hex private key or None to generate
+
+# Initialise wallet immediately — needed before registration so we have an address
+_wallet = Wallet(private_key_hex=WALLET_KEY)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -76,6 +81,9 @@ _shutdown   = threading.Event()
 # Latest chain tip known to this miner (updated by /new_block handler)
 _current_tip: dict = {"index": 0, "hash": ""}
 
+# Current PoW target string — set during activation, used by /validate_block
+_mining_target: str = ""
+
 # ---------------------------------------------------------------------------
 # Lifespan — runs once when the container starts
 # ---------------------------------------------------------------------------
@@ -83,6 +91,11 @@ _current_tip: dict = {"index": 0, "hash": ""}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _mining_target
+
+    logger.info("Wallet address: %s", _wallet.address)
+    logger.info("Public key:     %s…", _wallet.public_key_hex[:32])
+
     # Retry registering with the node until it accepts us.
     # Docker starts containers in parallel, so the node may not be ready yet.
     reg = _register_with_node()
@@ -112,6 +125,8 @@ async def lifespan(app: FastAPI):
         _shutdown.set()
         _stop_event.set()
         return
+
+    _mining_target = mining_target  # store globally for /validate_block
 
     with _lock:
         _current_tip["index"] = tip["index"]
@@ -213,6 +228,19 @@ def _get_chain_tip() -> dict:
     return {"index": 0, "hash": ""}
 
 
+def _fetch_mempool() -> list[dict]:
+    """
+    Fetch up to 10 pending transactions from the node's mempool.
+    Returns an empty list on any failure — mining continues without txs.
+    """
+    try:
+        resp = httpx.get(f"{NODE_URL}/mempool", timeout=3.0)
+        resp.raise_for_status()
+        return resp.json().get("transactions", [])
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Mining loop  (runs in background thread)
 # ---------------------------------------------------------------------------
@@ -242,14 +270,18 @@ def _mining_loop(target: str) -> None:
 
         next_index = tip_index + 1
 
+        # Build transactions: coinbase reward first, then up to 5 mempool txs
+        coinbase = Transaction.coinbase(
+            to_addr=_wallet.address, block_index=next_index
+        ).to_dict()
+        mempool_txs = _fetch_mempool()
+        transactions = [coinbase] + mempool_txs[:5]
+
         # Build a fresh candidate block for this height
         candidate = Block(
             index=next_index,
             timestamp=time.time(),
-            transactions=[
-                f"tx::{MINER_ID}::{next_index}::1",
-                f"tx::{MINER_ID}::{next_index}::2",
-            ],
+            transactions=transactions,
             previous_hash=tip_hash,
             nonce=0,
         )
@@ -374,6 +406,99 @@ async def health() -> dict:
     return {
         "status":      "ok",
         "miner_id":    MINER_ID,
+        "address":     _wallet.address,
         "current_tip": tip,
         "shutdown":    _shutdown.is_set(),
     }
+
+
+def _restart_flow() -> None:
+    """
+    Background thread: waits for the next simulation to start, then launches
+    a fresh mining loop.  Called after a /reset so the container stays alive
+    and re-uses its existing wallet and miner_id.
+    """
+    global _mining_target
+    logger.info("Waiting for next simulation to start…")
+    activated, config = _wait_for_activation()
+    if not activated:
+        logger.info("Not selected for next simulation run — staying idle")
+        return
+    tip = _get_chain_tip()
+    mining_target_local = "0" * config["difficulty"]
+    _mining_target = mining_target_local
+    with _lock:
+        _current_tip["index"] = tip["index"]
+        _current_tip["hash"]  = tip["hash"]
+    _stop_event.clear()
+    threading.Thread(
+        target=_mining_loop,
+        args=(mining_target_local,),
+        daemon=True,
+        name=f"miner-{MINER_ID}",
+    ).start()
+    logger.info(
+        "Mining thread restarted for new experiment — target='%s'", mining_target_local
+    )
+
+
+@app.post("/reset")
+async def reset_miner() -> dict:
+    """
+    Called by the node when the user clicks 'Run Another Experiment'.
+    Stops any active mining and re-enters the activation-wait loop so this
+    container participates in the next simulation without a restart.
+    """
+    global _mining_target
+    logger.info("Reset signal received — preparing for next experiment")
+    # Clear the permanent shutdown flag so the mining loop can run again
+    _shutdown.clear()
+    # Interrupt the current nonce search (if any) so the thread exits cleanly
+    _stop_event.set()
+    _mining_target = ""
+    with _lock:
+        _current_tip["index"] = 0
+        _current_tip["hash"]  = ""
+    threading.Thread(
+        target=_restart_flow,
+        daemon=True,
+        name=f"miner-restart-{MINER_ID}",
+    ).start()
+    return {"status": "reset"}
+
+
+@app.post("/validate_block")
+async def validate_block(payload: dict) -> dict:
+    """
+    Called by the node after accepting a block to request independent
+    peer validation.  Simulates Bitcoin's decentralised validation where
+    every node re-verifies every block it receives.
+
+    Checks performed:
+      1. Hash integrity — recompute and compare.
+      2. Proof-of-work  — hash must meet the current difficulty target.
+
+    Returns {"valid": bool, "miner_id": str, "reason": str}.
+    """
+    try:
+        block = Block.from_dict(payload)
+        recomputed = block.compute_hash()
+        if recomputed != block.hash:
+            return {
+                "valid":    False,
+                "miner_id": MINER_ID,
+                "reason":   f"hash mismatch: recomputed {recomputed[:12]}\u2026",
+            }
+        if _mining_target and not block.hash.startswith(_mining_target):
+            return {
+                "valid":    False,
+                "miner_id": MINER_ID,
+                "reason":   f"PoW not met: hash {block.hash[:12]}\u2026 "
+                            f"does not start with '{_mining_target}'",
+            }
+        logger.info(
+            "Peer-validated block #%d  hash=%s\u2026  \u2713", block.index, block.hash[:16]
+        )
+        return {"valid": True, "miner_id": MINER_ID, "reason": ""}
+    except Exception as exc:
+        return {"valid": False, "miner_id": MINER_ID, "reason": str(exc)}
