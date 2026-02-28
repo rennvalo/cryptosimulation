@@ -1,0 +1,200 @@
+# ---------------------------------------------------------------------------
+# .gitignore — CryptoSim
+# ---------------------------------------------------------------------------
+
+# ===========================================================================
+# SECRETS & ENVIRONMENT
+# Never commit real credentials, keys, or machine-specific config.
+# ===========================================================================
+.env
+.env.*
+!.env.example          # Checked-in template with dummy values is fine
+
+# SSL / TLS certificates and private keys
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.csr
+
+# JWT secrets, wallet seeds, API tokens (if stored as files)
+secrets/
+*.secret
+
+# ===========================================================================
+# PYTHON
+# ===========================================================================
+
+# Byte-compiled / interpreter cache
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+
+# Virtual environments (if running anything locally outside Docker)
+.venv/
+venv/
+env/
+ENV/
+.virtualenv/
+pipenv/
+
+# Distribution / packaging
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+wheels/
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+nosetests.xml
+test-results/
+*.log.test
+
+# Type checker caches
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyright/
+pyrightconfig.json
+.pyre/
+
+# Profiling data
+*.prof
+
+# Jupyter Notebooks (if added later)
+.ipynb_checkpoints/
+*.ipynb
+
+# ===========================================================================
+# DOCKER
+# ===========================================================================
+
+# Local compose overrides (machine-specific port mappings, volume mounts, etc.)
+docker-compose.override.yml
+
+# Docker build context cache
+.dockerignore        # Already tracked, but listed here for awareness
+
+# Named volume data dumped locally
+volumes/
+
+# ===========================================================================
+# LOGS
+# Application and server logs should not be committed — use a log aggregator.
+# ===========================================================================
+logs/
+*.log
+*.log.*
+log/
+uvicorn*.log
+access.log
+error.log
+
+# ===========================================================================
+# DATABASES / PERSISTENT STATE
+# If chain state is ever persisted to disk (SQLite, JSON snapshots, etc.)
+# ===========================================================================
+*.db
+*.sqlite
+*.sqlite3
+chain_data/
+snapshots/
+*.json.bak
+
+# ===========================================================================
+# IDE / EDITORS
+# ===========================================================================
+
+# VS Code — uncomment the line below to also ignore workspace settings
+# .vscode/
+.vscode/launch.json   # Local debug configs (machine-specific)
+.vscode/tasks.json    # Local task configs
+
+# JetBrains (PyCharm, IntelliJ, etc.)
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Vim / Neovim
+*.swp
+*.swo
+*.swn
+*~
+Session.vim
+.netrwhist
+
+# Emacs
+\#*\#
+.\#*
+*.elc
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# ===========================================================================
+# OPERATING SYSTEM
+# ===========================================================================
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ===========================================================================
+# MISCELLANEOUS
+# ===========================================================================
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+
+# Archives (generated artifacts, not source)
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Benchmark / experiment output
+benchmarks/output/
+results/
