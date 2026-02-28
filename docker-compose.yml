@@ -1,0 +1,99 @@
+# ---------------------------------------------------------------------------
+# docker-compose.yml — CryptoSim: Bitcoin-style PoW simulation
+#
+# Services:
+#   node      — Blockchain authority + live web dashboard  (localhost:8182)
+#   miner_1   — Mining container 1                         (localhost:8001)
+#   miner_2   — Mining container 2                         (localhost:8002)
+#   miner_3   — Mining container 3                         (localhost:8003)
+#
+# All services share the 'crypto_net' bridge network so they reach each
+# other by Docker service name  (e.g. http://node:8182, http://miner_1:8001).
+#
+# Tune the simulation via environment variables:
+#   DIFFICULTY  — Leading-zero hex chars required in a valid block hash.
+#                 4  → ~1-10 s per block  (good default for watching live)
+#                 3  → ~0.1-1 s per block (fast demo)
+#                 5  → ~10-60 s per block (slow, closer to real mining feel)
+#   NUM_BLOCKS  — How many blocks to mine before the simulation ends.
+#
+# To add a 4th miner:
+#   Copy the miner_3 block, rename it to miner_4, and change:
+#     ports:      - "8004:8004"
+#     MINER_ID:   miner_4
+#     MINER_URL:  http://miner_4:8004
+#     command:    uvicorn miner:app --host 0.0.0.0 --port 8004 --log-level warning
+# ---------------------------------------------------------------------------
+
+networks:
+  crypto_net:
+    driver: bridge
+
+services:
+
+  # ---------- Blockchain Node ----------------------------------------------
+  node:
+    build: .
+    command: uvicorn node:app --host 0.0.0.0 --port 8182 --log-level warning
+    ports:
+      - "8182:8182"     # Dashboard + API accessible at http://localhost:8182
+    environment:
+      DIFFICULTY: 4
+      NUM_BLOCKS: 10
+    networks:
+      - crypto_net
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import httpx; httpx.get('http://localhost:8182/chain', timeout=3)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ---------- Miner 1 ------------------------------------------------------
+  miner_1:
+    build: .
+    command: uvicorn miner:app --host 0.0.0.0 --port 8001 --log-level warning
+    ports:
+      - "8001:8001"     # Health: http://localhost:8001/health
+    environment:
+      NODE_URL:   http://node:8182
+      MINER_ID:   miner_1
+      MINER_URL:  http://miner_1:8001
+      DIFFICULTY: 4
+    networks:
+      - crypto_net
+    depends_on:
+      - node
+
+  # ---------- Miner 2 ------------------------------------------------------
+  miner_2:
+    build: .
+    command: uvicorn miner:app --host 0.0.0.0 --port 8002 --log-level warning
+    ports:
+      - "8002:8002"
+    environment:
+      NODE_URL:   http://node:8182
+      MINER_ID:   miner_2
+      MINER_URL:  http://miner_2:8002
+      DIFFICULTY: 4
+    networks:
+      - crypto_net
+    depends_on:
+      - node
+
+  # ---------- Miner 3 ------------------------------------------------------
+  miner_3:
+    build: .
+    command: uvicorn miner:app --host 0.0.0.0 --port 8003 --log-level warning
+    ports:
+      - "8003:8003"
+    environment:
+      NODE_URL:   http://node:8182
+      MINER_ID:   miner_3
+      MINER_URL:  http://miner_3:8003
+      DIFFICULTY: 4
+    networks:
+      - crypto_net
+    depends_on:
+      - node

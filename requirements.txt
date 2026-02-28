@@ -1,0 +1,11 @@
+# Python dependencies for CryptoSim
+#
+# fastapi        — async web framework powering both the node and miner HTTP APIs
+# uvicorn        — ASGI server that runs FastAPI; [standard] adds websocket + httptools
+# httpx          — async HTTP client used by:
+#                    node   → push accepted blocks to miners
+#                    miner  → register with node + submit solved blocks
+
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+httpx>=0.27.0
