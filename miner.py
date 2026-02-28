@@ -85,16 +85,50 @@ _current_tip: dict = {"index": 0, "hash": ""}
 async def lifespan(app: FastAPI):
     # Retry registering with the node until it accepts us.
     # Docker starts containers in parallel, so the node may not be ready yet.
-    tip = _register_with_node()
+    reg = _register_with_node()
+    status = reg.get("status", "registered")
+
+    if status == "waiting":
+        # Node is up but the user hasn't clicked Start yet — poll /config.
+        logger.info("Waiting for simulation to start...")
+        activated, config = _wait_for_activation()
+        if not activated:
+            logger.info("Not selected for this simulation run — staying idle")
+            yield
+            _shutdown.set()
+            _stop_event.set()
+            return
+        tip = _get_chain_tip()
+        mining_target = "0" * config["difficulty"]
+
+    elif status == "active":
+        tip = reg["tip"]
+        mining_target = "0" * reg["difficulty"]
+
+    else:
+        # status == "idle" — sim already running but this miner was not selected
+        logger.info("Not selected for this simulation run — staying idle")
+        yield
+        _shutdown.set()
+        _stop_event.set()
+        return
 
     with _lock:
         _current_tip["index"] = tip["index"]
         _current_tip["hash"]  = tip["hash"]
 
     # Launch the CPU-intensive mining loop in a background OS thread
-    t = threading.Thread(target=_mining_loop, daemon=True, name=f"miner-{MINER_ID}")
+    t = threading.Thread(
+        target=_mining_loop,
+        args=(mining_target,),
+        daemon=True,
+        name=f"miner-{MINER_ID}",
+    )
     t.start()
-    logger.info("Mining thread started — tip is block #%d", tip["index"])
+    logger.info(
+        "Mining thread started — tip is block #%d, target='%s'",
+        tip["index"], mining_target,
+    )
 
     yield
 
@@ -115,7 +149,10 @@ def _register_with_node() -> dict:
     """
     POST /register to the node with a retry loop.
 
-    Returns the current chain tip dict: { "index": N, "hash": "..." }
+    Returns the full registration response dict, e.g.:
+      {"status": "waiting"}                                     — sim not yet started
+      {"status": "active", "tip": {...}, "difficulty": N}      — sim running, we're in
+      {"status": "idle"}                                        — sim running, not selected
     """
     payload = {"miner_id": MINER_ID, "callback_url": MINER_URL}
     attempt = 0
@@ -126,10 +163,10 @@ def _register_with_node() -> dict:
             resp.raise_for_status()
             data = resp.json()
             logger.info(
-                "Registered with node (attempt %d) — chain tip: block #%d",
-                attempt, data["tip"]["index"]
+                "Registered with node (attempt %d) — status: %s",
+                attempt, data.get("status"),
             )
-            return data["tip"]
+            return data
         except Exception as exc:
             logger.warning(
                 "Node not ready (attempt %d): %s — retrying in 2 s…", attempt, exc
@@ -137,12 +174,51 @@ def _register_with_node() -> dict:
             time.sleep(2)
 
 
+def _wait_for_activation() -> tuple[bool, dict]:
+    """
+    Poll GET /config every 2 seconds until the simulation starts.
+
+    Returns (True, config) if this miner is in the active list,
+    or (False, {}) if the shutdown flag is set before start.
+    """
+    while not _shutdown.is_set():
+        try:
+            resp = httpx.get(f"{NODE_URL}/config", timeout=5.0)
+            resp.raise_for_status()
+            config = resp.json()
+            if config.get("started"):
+                is_active = MINER_ID in config.get("active", [])
+                return is_active, config
+        except Exception as exc:
+            logger.warning("Config poll failed: %s", exc)
+        time.sleep(2)
+    return False, {}
+
+
+def _get_chain_tip() -> dict:
+    """
+    Fetch the current chain tip from the node by reading /config.
+    Called after activation to find out which block to build on.
+    """
+    while not _shutdown.is_set():
+        try:
+            resp = httpx.get(f"{NODE_URL}/config", timeout=5.0)
+            resp.raise_for_status()
+            tip = resp.json().get("tip")
+            if tip:
+                return tip
+        except Exception as exc:
+            logger.warning("Tip fetch failed: %s", exc)
+        time.sleep(1)
+    return {"index": 0, "hash": ""}
+
+
 # ---------------------------------------------------------------------------
 # Mining loop  (runs in background thread)
 # ---------------------------------------------------------------------------
 
 
-def _mining_loop() -> None:
+def _mining_loop(target: str) -> None:
     """
     Core proof-of-work loop.
 
@@ -155,7 +231,6 @@ def _mining_loop() -> None:
          loop to pick up the new tip.
       5. If we find a valid hash first, submit the block to the node.
     """
-    target = "0" * DIFFICULTY
     logger.info("PoW target: hash must start with '%s'", target)
 
     while not _shutdown.is_set():
