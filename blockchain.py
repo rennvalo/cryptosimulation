@@ -16,6 +16,7 @@ import logging
 import time
 
 from block import Block
+from wallet import verify_signature
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,12 @@ class Blockchain:
     # Verification
     # ------------------------------------------------------------------
 
-    def verify_block(self, block: Block) -> tuple[bool, str]:
+    def verify_block(
+        self,
+        block: Block,
+        addr_to_pubkey: dict[str, str] | None = None,
+        pow_target: str | None = None,
+    ) -> tuple[bool, str]:
         """
         Verify a candidate block submitted by a miner.
 
@@ -96,6 +102,8 @@ class Blockchain:
           2. previous_hash matches last_block.hash   — correct chain linkage.
           3. Recomputed hash matches block.hash       — data integrity.
           4. Hash meets the difficulty target          — valid proof-of-work.
+             Pass pow_target="" to skip PoW (used for instant portal transfers).
+          5. Transfer signatures (if addr_to_pubkey supplied) — authenticity.
 
         Returns:
           (True,  "")       on success
@@ -126,12 +134,49 @@ class Blockchain:
             )
 
         # 4. Proof-of-work check
-        target = "0" * self.difficulty
-        if not block.hash.startswith(target):
+        # pow_target=None  → use the chain's current difficulty (normal miner blocks)
+        # pow_target=""    → skip PoW entirely (instant portal transfer blocks)
+        target = "0" * self.difficulty if pow_target is None else pow_target
+        if target and not block.hash.startswith(target):
             return False, (
                 f"Difficulty not met: hash {block.hash[:16]}... "
                 f"does not start with '{target}'"
             )
+
+        # 5. Transfer signature verification (optional — only when pubkey map provided)
+        if addr_to_pubkey:
+            for tx in block.transactions:
+                if not isinstance(tx, dict):
+                    continue
+                if tx.get("from_addr") in ("COINBASE", "simulated"):
+                    continue
+                sig = tx.get("signature", "")
+                if sig in ("", "simulated"):
+                    # Legacy simulated txs are allowed through without verification
+                    continue
+                from_addr = tx["from_addr"]
+                pubkey = addr_to_pubkey.get(from_addr)
+                if not pubkey:
+                    return False, (
+                        f"Unknown sender address {from_addr[:12]}... — "
+                        f"no public key registered"
+                    )
+                # Reconstruct the signing_data the sender would have signed
+                import json as _json
+                signing_payload = _json.dumps(
+                    {
+                        "from_addr": tx["from_addr"],
+                        "to_addr":   tx["to_addr"],
+                        "amount":    tx["amount"],
+                        "timestamp": tx["timestamp"],
+                    },
+                    sort_keys=True,
+                )
+                if not verify_signature(pubkey, signing_payload, sig):
+                    return False, (
+                        f"Invalid signature on tx {tx.get('tx_id','?')[:12]}... "
+                        f"from {from_addr[:12]}..."
+                    )
 
         return True, ""
 
@@ -175,26 +220,51 @@ class Blockchain:
     # Balances
     # ------------------------------------------------------------------
 
-    def compute_balances(self) -> dict[str, float]:
+    def compute_balances(self, confirmed_only: bool = True) -> dict[str, float]:
         """
-        Walk all confirmed blocks and sum RennCoin earned by each wallet address.
+        Walk blocks and compute RennCoin balances for every address.
 
-        Only coinbase transactions (from_addr == "COINBASE") are counted here;
-        peer transfers would also appear once the full UTXO model is wired up.
-        Only confirmed blocks (index <= confirmed_height) are included so that
-        unconfirmed rewards cannot be spent.
+        confirmed_only=True  (default) — only include blocks that have reached
+          2-block finality.  Used by the leaderboard and /balances endpoint.
+        confirmed_only=False — include every block in the chain (including the
+          latest unconfirmed tip).  Used by the portal wallet display so a
+          user sees their balance update immediately after buying/receiving RNC
+          rather than waiting for 2 more miner blocks.
+
+        Simulated/legacy transfers (signature == 'simulated') are always skipped.
         """
-        max_index = max(0, self.confirmed_height)
+        if confirmed_only:
+            max_index = max(0, self.confirmed_height)
+        else:
+            max_index = len(self.chain) - 1
         balances: dict[str, float] = {}
+
+        # Pass 1: coinbase rewards
         for block in self.chain:
             if block.index > max_index:
                 break
             for tx in block.transactions:
-                # Transactions are stored as dicts when serialised over HTTP
                 if isinstance(tx, dict) and tx.get("from_addr") == "COINBASE":
                     addr   = tx["to_addr"]
                     amount = float(tx.get("amount", 0))
                     balances[addr] = round(balances.get(addr, 0.0) + amount, 4)
+
+        # Pass 2: signed peer transfers (real signatures only)
+        for block in self.chain:
+            if block.index > max_index:
+                break
+            for tx in block.transactions:
+                if not isinstance(tx, dict):
+                    continue
+                from_addr = tx.get("from_addr", "")
+                sig       = tx.get("signature", "")
+                if from_addr in ("", "COINBASE") or sig in ("", "simulated"):
+                    continue
+                to_addr = tx["to_addr"]
+                amount  = float(tx.get("amount", 0))
+                balances[from_addr] = round(balances.get(from_addr, 0.0) - amount, 4)
+                balances[to_addr]   = round(balances.get(to_addr, 0.0)   + amount, 4)
+
         return balances
 
     # ------------------------------------------------------------------

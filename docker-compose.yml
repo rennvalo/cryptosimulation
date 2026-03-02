@@ -28,6 +28,8 @@ services:
       - "8182:8182"     # Dashboard + API accessible at http://localhost:8182
     environment:
       NUM_BLOCKS: 10
+    volumes:
+      - crypto_data:/app/data   # SQLite DB — persists wallets and blockchain across restarts
     networks:
       - crypto_net
     healthcheck:
@@ -178,3 +180,8 @@ services:
       - crypto_net
     depends_on:
       - node
+volumes:
+  crypto_data:
+    driver: local
+    # Data stored here persists across `docker compose down` and restarts.
+    # To wipe all data and start fresh:  docker volume rm crypto_crypto_data

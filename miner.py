@@ -169,7 +169,12 @@ def _register_with_node() -> dict:
       {"status": "active", "tip": {...}, "difficulty": N}      — sim running, we're in
       {"status": "idle"}                                        — sim running, not selected
     """
-    payload = {"miner_id": MINER_ID, "callback_url": MINER_URL, "address": _wallet.address}
+    payload = {
+        "miner_id":    MINER_ID,
+        "callback_url": MINER_URL,
+        "address":     _wallet.address,
+        "public_key":  _wallet.public_key_hex,
+    }
     attempt = 0
     while True:
         attempt += 1
@@ -314,13 +319,32 @@ def _mining_loop(target: str) -> None:
 
             # Check for interruption every 1 000 iterations to stay responsive
             # without the overhead of checking a threading.Event every loop
-            if nonce % 1_000 == 0 and _stop_event.is_set():
-                logger.info(
-                    "Block #%d mining interrupted at nonce=%d "
-                    "(node received a block from another miner)",
-                    next_index, nonce,
-                )
-                break
+            if nonce % 1_000 == 0:
+                # ── Live progress report ──────────────────────────────────
+                elapsed = time.time() - start_time
+                rate    = int(nonce / elapsed) if elapsed > 0 else 0
+                try:
+                    httpx.post(
+                        f"{NODE_URL}/mining_progress",
+                        json={
+                            "miner_id":    MINER_ID,
+                            "block_index": next_index,
+                            "nonce":       nonce,
+                            "hash_prefix": candidate.hash[:16],
+                            "rate":        rate,
+                        },
+                        timeout=0.4,
+                    )
+                except Exception:
+                    pass  # Never let a failed progress report stall mining
+                # ─────────────────────────────────────────────────────────
+                if _stop_event.is_set():
+                    logger.info(
+                        "Block #%d mining interrupted at nonce=%d "
+                        "(node received a block from another miner)",
+                        next_index, nonce,
+                    )
+                    break
 
         # Brief pause to let the /new_block handler update _current_tip
         # before the outer loop reads it again
@@ -465,6 +489,51 @@ async def reset_miner() -> dict:
         name=f"miner-restart-{MINER_ID}",
     ).start()
     return {"status": "reset"}
+
+
+@app.post("/sign_transfer")
+async def sign_transfer(payload: dict) -> JSONResponse:
+    """
+    Called by the node when a user wants to send RNC from this miner's wallet.
+    Builds a Transaction, signs it with this miner's private key, and returns
+    the fully-signed transaction dict ready for the mempool.
+
+    Body: { "to_addr": str, "amount": float, "timestamp": float }
+    """
+    try:
+        to_addr   = payload["to_addr"]
+        amount    = float(payload["amount"])
+        timestamp = float(payload["timestamp"])
+
+        if amount <= 0:
+            return JSONResponse(status_code=400, content={"error": "amount must be positive"})
+
+        # Build transaction with the agreed timestamp so signing_data is deterministic
+        tx = Transaction(
+            tx_id="",           # filled below after signing_data is known
+            from_addr=_wallet.address,
+            to_addr=to_addr,
+            amount=amount,
+            timestamp=timestamp,
+            signature="",
+        )
+        # Compute tx_id from canonical content
+        import hashlib, json as _json
+        tx.tx_id = hashlib.sha256(
+            f"{_wallet.address}:{to_addr}:{amount}:{timestamp}".encode()
+        ).hexdigest()
+        # Sign the canonical signing payload
+        tx.signature = _wallet.sign(tx.signing_data())
+        logger.info(
+            "Signed transfer: %.2f RNC → %s  tx_id=%s...",
+            amount, to_addr[:12], tx.tx_id[:12],
+        )
+        return JSONResponse(status_code=200, content=tx.to_dict())
+    except KeyError as exc:
+        return JSONResponse(status_code=400, content={"error": f"Missing field: {exc}"})
+    except Exception as exc:
+        logger.error("sign_transfer error: %s", exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
 @app.post("/validate_block")
