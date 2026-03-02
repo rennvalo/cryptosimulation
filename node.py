@@ -2149,14 +2149,15 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
 
     <!-- RNC Price Chart -->
     <div class="leaderboard-section panel" id="price-chart-section" style="margin-top:16px">
-      <h2>&#x1F4C8; RNC Price History&nbsp;<small style="color:#8b949e;font-size:0.75rem">(USD per RNC &mdash; updates with every trade)</small></h2>
+      <h2>&#x1F4C8; RNC Price History&nbsp;<small style="color:#8b949e;font-size:0.75rem" id="chart-resolution-hint">Every trade &mdash; USD per RNC</small></h2>
       <div style="margin-bottom:10px">
-        <button class="chart-tf active" onclick="setChartWindow(null,this)">All</button>
-        <button class="chart-tf" onclick="setChartWindow(1,this)">1 min</button>
-        <button class="chart-tf" onclick="setChartWindow(10,this)">10 min</button>
-        <button class="chart-tf" onclick="setChartWindow(30,this)">30 min</button>
-        <button class="chart-tf" onclick="setChartWindow(60,this)">1 hr</button>
-        <button class="chart-tf" onclick="setChartWindow(1440,this)">1 day</button>
+        <span style="color:#8b949e;font-size:0.78rem;margin-right:10px">Resolution:</span>
+        <button class="chart-tf active" onclick="setChartWindow(null,this)" title="Show every individual trade">All trades</button>
+        <button class="chart-tf" onclick="setChartWindow(1,this)" title="Show closing price per 1-minute bucket">1 min</button>
+        <button class="chart-tf" onclick="setChartWindow(10,this)" title="Show closing price per 10-minute bucket">10 min</button>
+        <button class="chart-tf" onclick="setChartWindow(30,this)" title="Show closing price per 30-minute bucket">30 min</button>
+        <button class="chart-tf" onclick="setChartWindow(60,this)" title="Show closing price per hour">1 hr</button>
+        <button class="chart-tf" onclick="setChartWindow(1440,this)" title="Show closing price per day">1 day</button>
       </div>
       <div style="position:relative;height:240px;padding-top:4px">
         <canvas id="price-chart-canvas"></canvas>
@@ -2240,11 +2241,29 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
     // ── RNC Price chart ──────────────────────────────────────────────────
     const priceHistory = [];   // {{ ts: ms, label: str, price: float }}
     let priceChart = null;
-    let activeWindowMin = null; // null = show all
+    let activeBucketMin = null; // null = "All" (every raw point); number = bucket size in minutes
 
+    // Build display dataset: null = every raw point; N = last price per N-minute bucket
     function _buildChartDataset() {{
-      const cutoff = activeWindowMin ? Date.now() - activeWindowMin * 60_000 : 0;
-      return priceHistory.filter(p => p.ts >= cutoff);
+      if (!activeBucketMin) {{
+        // All — return every individual trade point
+        return priceHistory.map(p => ({{ label: p.label, price: p.price }}));
+      }}
+      const bucketMs = activeBucketMin * 60000;
+      const buckets = {{}}; // numeric key → {{ label, price }}
+      for (const p of priceHistory) {{
+        const key = Math.floor(p.ts / bucketMs);
+        const d = new Date(key * bucketMs);
+        let label;
+        if (activeBucketMin >= 1440) {{
+          label = d.toLocaleDateString('en-GB', {{ month: 'short', day: 'numeric' }});
+        }} else {{
+          label = d.toLocaleTimeString('en-GB', {{ hour: '2-digit', minute: '2-digit' }});
+        }}
+        // last price in bucket wins (closing price)
+        buckets[key] = {{ label, price: p.price }};
+      }}
+      return Object.keys(buckets).sort((a,b) => a-b).map(k => buckets[k]);
     }}
 
     function applyChartWindow() {{
@@ -2252,13 +2271,23 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
       const pts = _buildChartDataset();
       priceChart.data.labels = pts.map(p => p.label);
       priceChart.data.datasets[0].data = pts.map(p => p.price);
+      // Update dot size: small for dense all-trades view, larger for bucketed
+      priceChart.data.datasets[0].pointRadius = activeBucketMin ? 4 : (pts.length > 40 ? 2 : 3);
       priceChart.update('none');
     }}
 
     function setChartWindow(minutes, btn) {{
-      activeWindowMin = minutes;
+      activeBucketMin = minutes;
       document.querySelectorAll('.chart-tf').forEach(b => b.classList.remove('active'));
       if (btn) btn.classList.add('active');
+      // Update subtitle hint
+      const hint = document.getElementById('chart-resolution-hint');
+      if (hint) {{
+        if (!minutes) hint.textContent = 'Every trade \u2014 USD per RNC';
+        else if (minutes < 60) hint.textContent = `Closing price per ${{minutes}}-minute interval \u2014 USD per RNC`;
+        else if (minutes === 60) hint.textContent = 'Closing price per hour \u2014 USD per RNC';
+        else hint.textContent = 'Closing price per day \u2014 USD per RNC';
+      }}
       applyChartWindow();
     }}
 
@@ -2296,7 +2325,7 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
             maintainAspectRatio: false,
             animation: false,
             scales: {{
-              x: {{ ticks: {{ color: '#8b949e', maxTicksLimit: 12 }}, grid: {{ color: '#21262d' }} }},
+              x: {{ ticks: {{ color: '#8b949e', maxTicksLimit: 16 }}, grid: {{ color: '#21262d' }} }},
               y: {{ ticks: {{ color: '#8b949e', callback: v => '$' + v.toFixed(2) }}, grid: {{ color: '#21262d' }}, min: 0 }}
             }},
             plugins: {{
