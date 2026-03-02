@@ -1948,6 +1948,13 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
     .block-index {{ color: #f0883e; font-size: 1.1rem; font-weight: bold; min-width: 48px; }}
     .block-hash  {{ color: #3fb950; font-family: monospace; font-size: 0.75rem; }}
     .block-meta  {{ color: #8b949e; font-size: 0.72rem; text-align: right; line-height: 1.5; }}
+    .chart-tf {{
+      background: #21262d; border: 1px solid #30363d; color: #8b949e;
+      padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 0.78rem;
+      margin-right: 4px; font-family: inherit; transition: background 0.15s, color 0.15s;
+    }}
+    .chart-tf:hover {{ background: #30363d; color: #c9d1d9; }}
+    .chart-tf.active {{ background: #f0883e22; border-color: #f0883e; color: #f0883e; }}
     .mc0 {{ color: #58a6ff; }}
     .mc1 {{ color: #f0883e; }}
     .mc2 {{ color: #bc8cff; }}
@@ -1959,6 +1966,7 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
     .mc8 {{ color: #56d364; }}
     .mc9 {{ color: #ffa198; }}
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -2035,6 +2043,11 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
         <div class="stat-label">Total Coins</div>
         <div class="stat-value" id="stat-coins">0</div>
         <div class="stat-hint">click for breakdown</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">RNC Price</div>
+        <div class="stat-value" id="stat-rnc-price">$10.00</div>
+        <div class="stat-hint">USD per RNC</div>
       </div>
     </div>
 
@@ -2134,6 +2147,22 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
       </div><!-- /drawer-body -->
     </div><!-- /wallet-drawer -->
 
+    <!-- RNC Price Chart -->
+    <div class="leaderboard-section panel" id="price-chart-section" style="margin-top:16px">
+      <h2>&#x1F4C8; RNC Price History&nbsp;<small style="color:#8b949e;font-size:0.75rem">(USD per RNC &mdash; updates with every trade)</small></h2>
+      <div style="margin-bottom:10px">
+        <button class="chart-tf active" onclick="setChartWindow(null,this)">All</button>
+        <button class="chart-tf" onclick="setChartWindow(1,this)">1 min</button>
+        <button class="chart-tf" onclick="setChartWindow(10,this)">10 min</button>
+        <button class="chart-tf" onclick="setChartWindow(30,this)">30 min</button>
+        <button class="chart-tf" onclick="setChartWindow(60,this)">1 hr</button>
+        <button class="chart-tf" onclick="setChartWindow(1440,this)">1 day</button>
+      </div>
+      <div style="position:relative;height:240px;padding-top:4px">
+        <canvas id="price-chart-canvas"></canvas>
+      </div>
+    </div>
+
     <div class="grid">
       <div class="panel">
         <h2>Event Log</h2>
@@ -2207,6 +2236,79 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
     const minerAddrs = {{}};
     // address → username for portal/user wallets
     const portalAddrs = {{}};
+
+    // ── RNC Price chart ──────────────────────────────────────────────────
+    const priceHistory = [];   // {{ ts: ms, label: str, price: float }}
+    let priceChart = null;
+    let activeWindowMin = null; // null = show all
+
+    function _buildChartDataset() {{
+      const cutoff = activeWindowMin ? Date.now() - activeWindowMin * 60_000 : 0;
+      return priceHistory.filter(p => p.ts >= cutoff);
+    }}
+
+    function applyChartWindow() {{
+      if (!priceChart) return;
+      const pts = _buildChartDataset();
+      priceChart.data.labels = pts.map(p => p.label);
+      priceChart.data.datasets[0].data = pts.map(p => p.price);
+      priceChart.update('none');
+    }}
+
+    function setChartWindow(minutes, btn) {{
+      activeWindowMin = minutes;
+      document.querySelectorAll('.chart-tf').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      applyChartWindow();
+    }}
+
+    function pushPricePoint(price) {{
+      if (price == null) return;
+      const now = new Date();
+      const label = now.toLocaleTimeString('en-GB', {{hour:'2-digit', minute:'2-digit', second:'2-digit'}});
+      priceHistory.push({{ ts: now.getTime(), label, price }});
+      if (!priceChart) {{
+        const canvas = document.getElementById('price-chart-canvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const grad = ctx.createLinearGradient(0, 0, 0, 240);
+        grad.addColorStop(0, 'rgba(240,136,62,0.35)');
+        grad.addColorStop(1, 'rgba(240,136,62,0.02)');
+        const pts = _buildChartDataset();
+        priceChart = new Chart(canvas, {{
+          type: 'line',
+          data: {{
+            labels: pts.map(p => p.label),
+            datasets: [{{
+              label: 'RNC Price (USD)',
+              data: pts.map(p => p.price),
+              borderColor: '#f0883e',
+              backgroundColor: grad,
+              borderWidth: 2,
+              tension: 0.35,
+              pointRadius: 3,
+              pointBackgroundColor: '#f0883e',
+              fill: true,
+            }}]
+          }},
+          options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            scales: {{
+              x: {{ ticks: {{ color: '#8b949e', maxTicksLimit: 12 }}, grid: {{ color: '#21262d' }} }},
+              y: {{ ticks: {{ color: '#8b949e', callback: v => '$' + v.toFixed(2) }}, grid: {{ color: '#21262d' }}, min: 0 }}
+            }},
+            plugins: {{
+              legend: {{ labels: {{ color: '#c9d1d9' }} }},
+              tooltip: {{ callbacks: {{ label: c => ' $' + c.parsed.y.toFixed(2) + ' USD' }} }}
+            }}
+          }}
+        }});
+      }} else {{
+        applyChartWindow();
+      }}
+    }}
 
     // ── Modal helpers ─────────────────────────────────────────────────────
     const modalOverlay = document.getElementById('info-modal-overlay');
@@ -2457,6 +2559,11 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
             if (bals.rnc_price) {{
               const rateEl = document.getElementById('rnc-rate-display');
               if (rateEl) rateEl.textContent = '$' + bals.rnc_price.toFixed(2) + ' USD = 1 RNC';
+              const sellEl = document.getElementById('rnc-sell-rate');
+              if (sellEl) sellEl.textContent = '$' + bals.rnc_price.toFixed(2) + ' USD = 1 RNC';
+              const statEl = document.getElementById('stat-rnc-price');
+              if (statEl) statEl.textContent = '$' + bals.rnc_price.toFixed(2);
+              pushPricePoint(bals.rnc_price);
             }}
             // Mark any already-finalized blocks
             if (chain.confirmed_height > 0) markFinalized(chain.confirmed_height);
@@ -2551,6 +2658,9 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
         if (rateEl) rateEl.textContent = '$' + rnc_price.toFixed(2) + ' USD = 1 RNC';
         const sellEl = document.getElementById('rnc-sell-rate');
         if (sellEl) sellEl.textContent = '$' + rnc_price.toFixed(2) + ' USD = 1 RNC';
+        const statEl = document.getElementById('stat-rnc-price');
+        if (statEl) statEl.textContent = '$' + rnc_price.toFixed(2);
+        pushPricePoint(rnc_price);
       }}
       refreshTotalCoins();
       updateLeaderboard();
@@ -2710,6 +2820,9 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
           if (rateEl) rateEl.textContent = '$' + data.rnc_price.toFixed(2) + ' USD = 1 RNC';
           const sellEl = document.getElementById('rnc-sell-rate');
           if (sellEl) sellEl.textContent = '$' + data.rnc_price.toFixed(2) + ' USD = 1 RNC';
+          const statEl = document.getElementById('stat-rnc-price');
+          if (statEl) statEl.textContent = '$' + data.rnc_price.toFixed(2);
+          pushPricePoint(data.rnc_price);
         }}
       }} catch(_) {{}}
     }}
