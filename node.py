@@ -1158,6 +1158,11 @@ async def portal_buy_rnc(payload: dict) -> JSONResponse:
         "signature": sig,
     }
 
+    asyncio.create_task(log_event(
+        f"\U0001f4b8 Portal BUY: {username} bought {rnc_amount} RNC"
+        f" for ${usd_amount:.2f} USD — RNC price now ${_rnc_price:.2f}",
+        "info",
+    ))
     asyncio.create_task(_mine_transfer_block(tx_dict))
 
     return JSONResponse(status_code=200, content={
@@ -1230,6 +1235,11 @@ async def portal_sell_rnc(payload: dict) -> JSONResponse:
         "timestamp": timestamp,
         "signature": sig,
     }
+    asyncio.create_task(log_event(
+        f"\U0001f4c9 Portal SELL: {username} sold {rnc_amount} RNC"
+        f" for ${usd_received:.2f} USD — RNC price now ${_rnc_price:.2f}",
+        "info",
+    ))
     asyncio.create_task(_mine_transfer_block(tx_dict))
 
     return JSONResponse(status_code=200, content={
