@@ -415,35 +415,68 @@ async def _mempool_generator() -> None:
     transactions between random miner wallets and add them to the mempool.
     Mirrors a real blockchain's flow of user transactions waiting to be
     picked up and included by miners.
+    Each internal trade also nudges _rnc_price up or down (smaller impact
+    than portal buy/sell — market noise from miner-to-miner activity).
     """
+    global _rnc_price
+
     while True:
-        await asyncio.sleep(random.uniform(5, 12))
-        if not started or len(miner_addresses) < 2:
-            continue
-        addrs = list(miner_addresses.items())          # [(miner_id, address), ...]
-        from_id, from_addr = random.choice(addrs)
-        to_candidates = [(mid, addr) for mid, addr in addrs if mid != from_id]
-        if not to_candidates:
-            continue
-        _, to_addr = random.choice(to_candidates)
-        amount = round(random.uniform(1.0, 10.0), 2)
-        tx = Transaction.transfer(
-            from_addr=from_addr,
-            to_addr=to_addr,
-            amount=amount,
-            signature="simulated",
-        ).to_dict()
-        _mempool.append(tx)
-        if len(_mempool) > 50:
-            _mempool.pop(0)
-        await log_event(
-            f"Mempool: +tx  {amount} RNC  {from_addr[:8]}\u2026 → {to_addr[:8]}\u2026"
-        )
-        for q in list(_sse_clients):
-            try:
-                q.put_nowait({"type": "mempool_update", "data": {"count": len(_mempool)}})
-            except asyncio.QueueFull:
-                pass
+        try:
+            await asyncio.sleep(random.uniform(5, 12))
+            if not started or len(miner_addresses) < 2:
+                continue
+            addrs = list(miner_addresses.items())          # [(miner_id, address), ...]
+            from_id, from_addr = random.choice(addrs)
+            to_candidates = [(mid, addr) for mid, addr in addrs if mid != from_id]
+            if not to_candidates:
+                continue
+            _, to_addr = random.choice(to_candidates)
+            amount = round(random.uniform(1.0, 10.0), 2)
+            tx = Transaction.transfer(
+                from_addr=from_addr,
+                to_addr=to_addr,
+                amount=amount,
+                signature="simulated",
+            ).to_dict()
+            _mempool.append(tx)
+            if len(_mempool) > 50:
+                _mempool.pop(0)
+
+            # Price impact: small random % move, up or down — background market noise
+            # Range 1–10% of current price (much smaller than portal buy/sell 1–50%)
+            impact = round(random.uniform(0.01, 0.10) * _rnc_price, 2)
+            direction = random.choice([1, -1])
+            _rnc_price = max(1.0, round(_rnc_price + direction * impact, 2))
+            _db_save_meta(rnc_price=_rnc_price)
+
+            direction_word = "\u25b2" if direction == 1 else "\u25bc"
+            await log_event(
+                f"Mempool: +tx  {amount} RNC  {from_addr[:8]}\u2026 \u2192 {to_addr[:8]}\u2026"
+                f"  |  RNC {direction_word} ${_rnc_price:.2f}"
+            )
+
+            # Push price and mempool count to all connected browsers immediately
+            for q in list(_sse_clients):
+                try:
+                    q.put_nowait({"type": "mempool_update", "data": {"count": len(_mempool)}})
+                except asyncio.QueueFull:
+                    pass
+            portal_addr_map = {w.address: u for u, w in list(portal_wallets.items())}
+            for q in list(_sse_clients):
+                try:
+                    q.put_nowait({"type": "balance_update", "data": {
+                        "balances": {},
+                        "miner_addresses": dict(miner_addresses),
+                        "portal_addresses": portal_addr_map,
+                        "block_counts": {},
+                        "rnc_price": _rnc_price,
+                    }})
+                except asyncio.QueueFull:
+                    pass
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.warning("_mempool_generator error (will retry): %s", exc)
 
 
 async def signal_shutdown_to_miners() -> None:
@@ -1128,10 +1161,10 @@ async def portal_buy_rnc(payload: dict) -> JSONResponse:
     if blockchain is None:
         return JSONResponse(status_code=503, content={"error": "Simulation not started"})
 
-    # Deduct USD, debit treasury, bump price
+    # Deduct USD, debit treasury, bump price by 1–50% of current price
     portal_usd[username] = round(portal_usd[username] - usd_amount, 4)
     _treasury_balance    = round(_treasury_balance - rnc_amount, 4)
-    price_bump = round(random.uniform(1.0, 5.0) * rnc_amount, 2)
+    price_bump = round(random.uniform(0.01, 0.50) * _rnc_price, 2)
     _rnc_price = round(_rnc_price + price_bump, 2)
     # Persist updated USD, treasury, and price
     _db_update_portal_usd(username, portal_usd[username])
@@ -1209,7 +1242,7 @@ async def portal_sell_rnc(payload: dict) -> JSONResponse:
     # Credit USD, restore treasury RNC, drop price
     portal_usd[username] = round(portal_usd[username] + usd_received, 4)
     _treasury_balance    = round(_treasury_balance + rnc_amount, 4)
-    price_drop = round(random.uniform(1.0, 5.0) * rnc_amount, 2)
+    price_drop = round(random.uniform(0.01, 0.50) * _rnc_price, 2)
     _rnc_price = max(1.0, round(_rnc_price - price_drop, 2))
 
     _db_update_portal_usd(username, portal_usd[username])
@@ -1412,8 +1445,8 @@ async def events(request: Request) -> StreamingResponse:
                     if isinstance(data, dict):
                         data = json.dumps(data)
                     yield f"event: {event_type}\ndata: {data}\n\n"
-                    if event_type == "shutdown":
-                        break
+                    # Do NOT break on shutdown — keep stream open so live market
+                    # price updates and mempool trades keep reaching the browser
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"  # Keep the connection alive
         finally:
@@ -2669,11 +2702,11 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
     }});
 
     es.addEventListener('shutdown', () => {{
-      appendLog('[SYSTEM] Simulation complete — all target blocks mined.');
+      appendLog('[SYSTEM] Simulation complete \u2014 all target blocks mined.');
       const badge = document.getElementById('status-badge');
       badge.textContent = 'DONE';
       badge.className   = 'done';
-      es.close();
+      // Keep SSE open so live market activity (price, mempool trades) keeps streaming
       document.getElementById('btn-new-experiment').style.display = 'inline-block';
     }});
 
@@ -2744,8 +2777,8 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
     }});
 
     es.onerror = () => {{
-      appendLog('[SYSTEM] SSE connection lost — simulation may have ended.');
-      es.close();
+      // Don't close — EventSource will auto-reconnect, which replays event history
+      appendLog('[SYSTEM] SSE connection interrupted — reconnecting…');
     }};
 
     // ── Portal / Wallet Drawer ────────────────────────────────────────────
