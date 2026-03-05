@@ -17,6 +17,8 @@
 networks:
   crypto_net:
     driver: bridge
+  frontend:
+    external: true  # Ensure this matches an existing external network
 
 services:
 
@@ -32,6 +34,7 @@ services:
       - crypto_data:/app/data   # SQLite DB — persists wallets and blockchain across restarts
     networks:
       - crypto_net
+      - frontend  # Same network as Nginx Proxy Manager
     healthcheck:
       test: ["CMD", "python", "-c",
              "import httpx; httpx.get('http://localhost:8182/chain', timeout=3)"]
