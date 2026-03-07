@@ -276,6 +276,7 @@ portal_usd: dict[str, float]      = {}
 USER_STARTING_USD  = 1_000.0
 BASE_RNC_PRICE_USD = 10.0        # floor / starting price per RNC
 _rnc_price: float  = BASE_RNC_PRICE_USD   # live market price — mutates with every trade
+_price_history: list[dict] = []           # [{"t": epoch_ms, "price": float}, ...] — full run history
 
 
 # Pending RennCoin transaction pool (filled by background generator)
@@ -453,6 +454,7 @@ async def _mempool_generator() -> None:
             else:
                 _rnc_price = max(1.0, round(_rnc_price / (1.0 + r), 2))
             _db_save_meta(rnc_price=_rnc_price)
+            _price_history.append({"t": int(time.time() * 1000), "price": _rnc_price})
 
             direction_word = "\u25b2" if direction == 1 else "\u25bc"
             await log_event(
@@ -857,6 +859,8 @@ async def start_simulation(payload: dict) -> JSONResponse:
     global _treasury_balance
     _treasury_balance = TREASURY_INITIAL_RNC
     addr_to_pubkey[_treasury.address] = _treasury.public_key_hex
+    # Seed the price history with the starting price
+    _price_history.append({"t": int(time.time() * 1000), "price": _rnc_price})
 
     # Persist simulation start so state can be recovered after a node restart
     _db_save_block(blockchain.chain[0])   # persist genesis block
@@ -903,6 +907,7 @@ async def reset_simulation() -> JSONResponse:
     """
     global started, blockchain, simulation_done, active_miner_ids
     global _mempool, _finalized_height, _recent_accepted, _treasury_balance, _rnc_price
+    global _price_history
 
     started           = False
     blockchain        = None
@@ -913,6 +918,7 @@ async def reset_simulation() -> JSONResponse:
     _recent_accepted  = {}
     _treasury_balance = 0.0
     _rnc_price        = BASE_RNC_PRICE_USD
+    _price_history    = []
     _event_log.clear()
 
     # Reset every portal user's USD back to the starting allowance
@@ -1174,6 +1180,7 @@ async def portal_buy_rnc(payload: dict) -> JSONResponse:
     # Persist updated USD, treasury, and price
     _db_update_portal_usd(username, portal_usd[username])
     _db_save_meta(treasury_balance=_treasury_balance, rnc_price=_rnc_price)
+    _price_history.append({"t": int(time.time() * 1000), "price": _rnc_price})
 
     # Treasury signs the transfer
     to_addr   = portal_wallets[username].address
@@ -1252,6 +1259,7 @@ async def portal_sell_rnc(payload: dict) -> JSONResponse:
 
     _db_update_portal_usd(username, portal_usd[username])
     _db_save_meta(treasury_balance=_treasury_balance, rnc_price=_rnc_price)
+    _price_history.append({"t": int(time.time() * 1000), "price": _rnc_price})
 
     # Sign and mine a transfer: user → treasury
     timestamp = time.time()
@@ -1416,6 +1424,16 @@ async def portal_users() -> dict:
 async def portal_all_addresses() -> dict:
     """Return every known address: miners + portal users (for send dropdowns)."""
     return {"addresses": _all_known_addresses()}
+
+
+@app.get("/price_history")
+async def get_price_history() -> dict:
+    """
+    Return the full RNC price history for the current simulation run.
+    Used by the dashboard on page-load to pre-populate the price chart
+    so late-joining browsers see the complete price history.
+    """
+    return {"history": list(_price_history)}
 
 
 @app.get("/events")
@@ -2339,11 +2357,13 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
       applyChartWindow();
     }}
 
-    function pushPricePoint(price) {{
+    function pushPricePoint(price, skipPush = false) {{
       if (price == null) return;
-      const now = new Date();
-      const label = now.toLocaleTimeString('en-GB', {{hour:'2-digit', minute:'2-digit', second:'2-digit'}});
-      priceHistory.push({{ ts: now.getTime(), label, price }});
+      if (!skipPush) {{
+        const now = new Date();
+        const label = now.toLocaleTimeString('en-GB', {{hour:'2-digit', minute:'2-digit', second:'2-digit'}});
+        priceHistory.push({{ ts: now.getTime(), label, price }});
+      }}
       if (!priceChart) {{
         const canvas = document.getElementById('price-chart-canvas');
         if (!canvas) return;
@@ -2632,7 +2652,7 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
             if (bals.block_counts) {{
               Object.assign(blockCounts, bals.block_counts);
             }}
-            // Show current RNC price
+            // Show current RNC price and pre-populate chart with full history
             if (bals.rnc_price) {{
               const rateEl = document.getElementById('rnc-rate-display');
               if (rateEl) rateEl.textContent = '$' + bals.rnc_price.toFixed(2) + ' USD = 1 RNC';
@@ -2640,7 +2660,17 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
               if (sellEl) sellEl.textContent = '$' + bals.rnc_price.toFixed(2) + ' USD = 1 RNC';
               const statEl = document.getElementById('stat-rnc-price');
               if (statEl) statEl.textContent = '$' + bals.rnc_price.toFixed(2);
-              pushPricePoint(bals.rnc_price);
+              // Fetch full price history so late-joining browsers see the whole chart
+              try {{
+                const ph = await fetch('/price_history').then(r => r.json());
+                for (const pt of (ph.history || [])) {{
+                  const d = new Date(pt.t);
+                  const lbl = d.toLocaleTimeString('en-GB', {{hour:'2-digit', minute:'2-digit', second:'2-digit'}});
+                  priceHistory.push({{ ts: pt.t, label: lbl, price: pt.price }});
+                }}
+              }} catch(e) {{ console.warn('Price history fetch failed', e); }}
+              // skipPush=true when history already populated to avoid duplicating last point
+              pushPricePoint(bals.rnc_price, priceHistory.length > 0);
             }}
             // Mark any already-finalized blocks
             if (chain.confirmed_height > 0) markFinalized(chain.confirmed_height);
