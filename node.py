@@ -442,11 +442,16 @@ async def _mempool_generator() -> None:
             if len(_mempool) > 50:
                 _mempool.pop(0)
 
-            # Price impact: small random % move, up or down — background market noise
-            # Range 1–10% of current price (much smaller than portal buy/sell 1–50%)
-            impact = round(random.uniform(0.01, 0.10) * _rnc_price, 2)
+            # Price impact: symmetric multiplicative move — background market noise.
+            # Range 1–10% of current price (much smaller than portal buy/sell 1–50%).
+            # Use up = P*(1+r) / down = P/(1+r) so a round-trip is exactly neutral,
+            # eliminating the variance-drain downward bias of additive ± dollar moves.
+            r         = random.uniform(0.01, 0.10)
             direction = random.choice([1, -1])
-            _rnc_price = max(1.0, round(_rnc_price + direction * impact, 2))
+            if direction == 1:
+                _rnc_price = max(1.0, round(_rnc_price * (1.0 + r), 2))
+            else:
+                _rnc_price = max(1.0, round(_rnc_price / (1.0 + r), 2))
             _db_save_meta(rnc_price=_rnc_price)
 
             direction_word = "\u25b2" if direction == 1 else "\u25bc"
