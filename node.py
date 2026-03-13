@@ -716,7 +716,7 @@ async def submit_block(payload: dict) -> JSONResponse:
                 f"=== Max difficulty ({MAX_DIFFICULTY}) reached at block #{block.index}. "
                 f"Mining complete. Trading continues. ==="
             )
-            await broadcast_block_to_miners(block)
+            asyncio.create_task(broadcast_block_to_miners(block))
             asyncio.create_task(signal_shutdown_to_miners())
             return JSONResponse(status_code=200, content={"status": "accepted"})
 
@@ -729,11 +729,12 @@ async def submit_block(payload: dict) -> JSONResponse:
             f"=== Safety cap reached: {NUM_BLOCKS} blocks mined without hitting max difficulty. "
             f"Shutting down miners. Trading continues. ==="
         )
-        # Broadcast the final block, then send shutdown
-        await broadcast_block_to_miners(block)
+        # Broadcast the final block, then send shutdown — both run in background
+        # so the submission handler returns immediately (no blocking HTTP calls)
+        asyncio.create_task(broadcast_block_to_miners(block))
         asyncio.create_task(signal_shutdown_to_miners())
     else:
-        await broadcast_block_to_miners(block)
+        asyncio.create_task(broadcast_block_to_miners(block))
 
     return JSONResponse(status_code=200, content={"status": "accepted"})
 
@@ -1501,12 +1502,17 @@ async def events(request: Request) -> StreamingResponse:
     Recent history is replayed for clients that join mid-simulation.
     A heartbeat comment is sent every 20 s to prevent proxy timeouts.
     """
-    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
     _sse_clients.append(queue)
 
-    # Replay recent event history so a late-joining browser has context
+    # Replay recent event history so a late-joining browser has context.
+    # Use put_nowait (not await put) — the generator hasn't started yet so
+    # no one is consuming the queue; an awaited put would deadlock here.
     for entry in list(_event_log):
-        await queue.put({"type": "log", "data": entry})
+        try:
+            queue.put_nowait({"type": "log", "data": entry})
+        except asyncio.QueueFull:
+            pass  # History longer than queue; oldest entries dropped
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
