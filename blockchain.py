@@ -213,13 +213,15 @@ class Blockchain:
         Formula:
           actual_time = elapsed seconds over the last ADJUSTMENT_INTERVAL blocks
           ratio       = actual_time / (ADJUSTMENT_INTERVAL * TARGET_BLOCK_TIME_SECS)
-          new_diff    = round(current_difficulty / ratio)
 
         ratio < 1 → blocks came in fast → raise difficulty
         ratio > 1 → blocks came in slow → lower difficulty
 
-        Bitcoin caps the ratio change at 4× in either direction per window
-        to prevent runaway adjustments; we do the same.
+        Bitcoin caps the ratio at 4× per window to prevent runaway adjustments.
+        We apply an additional ±1 per-window step cap because our difficulty
+        range is only 1–8 (integers): without it, a single fast window can jump
+        straight to MAX_DIFFICULTY and end the experiment immediately.  The step
+        cap keeps the climb gradual and observable.
         Difficulty is always clamped to [1, MAX_DIFFICULTY].
         """
         tip_index = self.last_block.index
@@ -240,10 +242,19 @@ class Blockchain:
         expected_time = ADJUSTMENT_INTERVAL * TARGET_BLOCK_TIME_SECS
         ratio = actual_time / expected_time
 
-        # Cap adjustment at 4× per window (Bitcoin's rule)
+        # Cap ratio at 4× per window (Bitcoin's rule)
         ratio = max(0.25, min(4.0, ratio))
 
-        new_difficulty = max(1, min(MAX_DIFFICULTY, round(self.difficulty / ratio)))
+        uncapped = max(1, min(MAX_DIFFICULTY, round(self.difficulty / ratio)))
+
+        # ±1 step cap: difficulty moves at most one level per window so the
+        # experiment progresses visibly rather than jumping to the ceiling.
+        if uncapped > self.difficulty:
+            new_difficulty = self.difficulty + 1
+        elif uncapped < self.difficulty:
+            new_difficulty = self.difficulty - 1
+        else:
+            new_difficulty = self.difficulty
 
         if new_difficulty != self.difficulty:
             logger.info(
