@@ -276,6 +276,11 @@ _chain_lock = asyncio.Lock()
 
 simulation_done = False
 
+# Throttle balance_update SSE pushes — at low difficulty blocks arrive faster
+# than the browser can repaint.  Max 2 per second is plenty for live display.
+_last_balance_push: float = 0.0
+_BALANCE_PUSH_INTERVAL = 0.5  # seconds
+
 # Index of the highest confirmed block (-1 = none confirmed yet)
 _finalized_height: int = -1
 
@@ -662,7 +667,7 @@ async def submit_block(payload: dict) -> JSONResponse:
             pass
 
     # Check finality advancement
-    global _finalized_height
+    global _finalized_height, _last_balance_push
     new_confirmed = blockchain.confirmed_height
     if new_confirmed > _finalized_height and new_confirmed >= 0:
         _finalized_height = new_confirmed
@@ -673,27 +678,32 @@ async def submit_block(payload: dict) -> JSONResponse:
                 q.put_nowait({"type": "finalized", "data": {"height": new_confirmed}})
             except asyncio.QueueFull:
                 pass
-        # Also send updated balances so leaderboard updates immediately
-        balances = blockchain.compute_balances(confirmed_only=False)
-        addr_to_miner = {addr: mid for mid, addr in miner_addresses.items()}
-        bc: dict[str, int] = {}
-        for blk in blockchain.chain[1:]:
-            for tx in blk.transactions:
-                if isinstance(tx, dict) and tx.get("from_addr") == "COINBASE":
-                    mid = addr_to_miner.get(tx.get("to_addr", ""))
-                    if mid:
-                        bc[mid] = bc.get(mid, 0) + 1
-        for q in list(_sse_clients):
-            try:
-                q.put_nowait({"type": "balance_update", "data": {
-                    "balances": balances,
-                    "miner_addresses": miner_addresses,
-                    "portal_addresses": {w.address: u for u, w in portal_wallets.items()},
-                    "block_counts": bc,
-                    "rnc_price": _rnc_price,
-                }})
-            except asyncio.QueueFull:
-                pass
+        # Throttle balance_update: at low difficulty blocks arrive faster than the
+        # browser can repaint.  Skip the expensive compute_balances call entirely
+        # when we sent one recently — the next one will arrive within 500 ms.
+        now = time.time()
+        if now - _last_balance_push >= _BALANCE_PUSH_INTERVAL:
+            _last_balance_push = now
+            balances = blockchain.compute_balances(confirmed_only=False)
+            addr_to_miner = {addr: mid for mid, addr in miner_addresses.items()}
+            bc: dict[str, int] = {}
+            for blk in blockchain.chain[1:]:
+                for tx in blk.transactions:
+                    if isinstance(tx, dict) and tx.get("from_addr") == "COINBASE":
+                        mid = addr_to_miner.get(tx.get("to_addr", ""))
+                        if mid:
+                            bc[mid] = bc.get(mid, 0) + 1
+            for q in list(_sse_clients):
+                try:
+                    q.put_nowait({"type": "balance_update", "data": {
+                        "balances": balances,
+                        "miner_addresses": miner_addresses,
+                        "portal_addresses": {w.address: u for u, w in portal_wallets.items()},
+                        "block_counts": bc,
+                        "rnc_price": _rnc_price,
+                    }})
+                except asyncio.QueueFull:
+                    pass
 
     # Kick off P2P validation and broadcast in the background
     asyncio.create_task(_peer_validate_block(block, miner_id))
@@ -2530,6 +2540,8 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
         return `<span class="${{colorClass(id)}}">${{match}}</span>`;
       }});
       logEl.appendChild(div);
+      // Cap log at 300 lines — prevents unbounded DOM growth and slow scrollTop writes
+      while (logEl.children.length > 300) logEl.removeChild(logEl.firstChild);
       logEl.scrollTop = logEl.scrollHeight;
     }}
 
@@ -2564,7 +2576,9 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
           </span>`;
       }}
       chainEl.insertBefore(card, chainEl.firstChild);
-      updateLeaderboard();
+      // Cap chain panel at 60 cards — prevents unbounded DOM growth at high block rates
+      while (chainEl.children.length > 60) chainEl.removeChild(chainEl.lastChild);
+      // Don't call updateLeaderboard() here — balance_update SSE handles it (max 2/s)
     }}
 
     /** Transition from setup screen to dashboard. */
