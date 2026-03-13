@@ -40,7 +40,7 @@ from wallet import Wallet, verify_signature
 # ---------------------------------------------------------------------------
 
 DIFFICULTY = int(os.environ.get("DIFFICULTY", 4))   # overridden by /start
-NUM_BLOCKS = int(os.environ.get("NUM_BLOCKS", 10))
+NUM_BLOCKS = int(os.environ.get("NUM_BLOCKS", 1000))  # safety cap — primary end is MAX_DIFFICULTY
 
 # ---------------------------------------------------------------------------
 # SQLite persistence
@@ -720,13 +720,14 @@ async def submit_block(payload: dict) -> JSONResponse:
             asyncio.create_task(signal_shutdown_to_miners())
             return JSONResponse(status_code=200, content={"status": "accepted"})
 
-    # Check simulation target (block count)
+    # Safety cap — primary end condition is reaching MAX_DIFFICULTY via the DAA.
+    # NUM_BLOCKS is a backstop so the simulation never runs indefinitely.
     if blockchain.last_block.index >= NUM_BLOCKS:
         simulation_done = True
         _db_save_meta(simulation_done="true")
         await log_event(
-            f"=== Simulation complete! {NUM_BLOCKS} blocks mined. "
-            f"Shutting down all miners. ==="
+            f"=== Safety cap reached: {NUM_BLOCKS} blocks mined without hitting max difficulty. "
+            f"Shutting down miners. Trading continues. ==="
         )
         # Broadcast the final block, then send shutdown
         await broadcast_block_to_miners(block)
@@ -2150,8 +2151,8 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
         <div class="stat-value" id="stat-diff">-</div>
       </div>
       <div class="stat-box">
-        <div class="stat-label">Target Blocks</div>
-        <div class="stat-value" id="stat-target">-</div>
+        <div class="stat-label">Max Difficulty</div>
+        <div class="stat-value" id="stat-target">8</div>
       </div>
       <div class="stat-box">
         <div class="stat-label">Mempool</div>
@@ -2499,7 +2500,7 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
       ['stat-mined',   'Blocks Mined',  'How many blocks have been successfully solved and accepted by the node during this simulation run.'],
       ['stat-miners',  'Active Miners', 'The number of miner containers selected to compete in this simulation. Each runs an independent proof-of-work loop.'],
       ['stat-diff',    'Difficulty',    'The number of leading hex zeros required in a valid block hash. Each additional zero makes mining ~16\u00d7 harder on average.'],
-      ['stat-target',  'Target Blocks', 'The simulation ends once this many blocks have been mined. Set before clicking Start.'],
+      ['stat-target',  'Max Difficulty', 'Mining ends when the Difficulty Adjustment Algorithm raises difficulty to 8. Miners solve blocks; as block times get faster, difficulty climbs until it hits the maximum.'],
       ['stat-mempool', 'Mempool',       'Pending transactions waiting to be included in a block. Miners pull up to 5 per block from this pool.'],
     ].forEach(([id, title, desc]) => {{
       const el = document.getElementById(id);
@@ -2578,9 +2579,9 @@ DASHBOARD_HTML = f"""<!DOCTYPE html>
       document.getElementById('dashboard-screen').style.display = '';
       const target = '0'.repeat(cfg.difficulty);
       document.getElementById('dash-subtitle').textContent =
-        `RennCoin proof-of-work simulation — difficulty: ${{target}} — target: ${{cfg.target ?? cfg.num_blocks}} blocks`;
+        `RennCoin proof-of-work simulation — difficulty: ${{target}} — ends when difficulty reaches 8`;
       document.getElementById('stat-diff').textContent   = cfg.difficulty;
-      document.getElementById('stat-target').textContent = cfg.target ?? cfg.num_blocks;
+      document.getElementById('stat-target').textContent = 8;  // always MAX_DIFFICULTY
       document.getElementById('stat-miners').textContent = cfg.num_miners ?? (cfg.active ? cfg.active.length : '-');
       const btnPortal = document.getElementById('btn-portal');
       if (btnPortal) btnPortal.style.display = 'inline-block';

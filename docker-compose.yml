@@ -11,7 +11,8 @@
 # The number of miners and difficulty are chosen at runtime through the
 # web dashboard at http://localhost:8182 — no need to edit this file.
 #
-# NUM_BLOCKS — How many blocks to mine before the simulation ends.
+# NUM_BLOCKS — Safety cap on block count. Primary end condition is the DAA reaching
+# max difficulty (8). Raise this if you want a longer-running experiment.
 # ---------------------------------------------------------------------------
 
 networks:
@@ -29,7 +30,7 @@ services:
     ports:
       - "8182:8182"     # Dashboard + API accessible at http://localhost:8182
     environment:
-      NUM_BLOCKS: 10
+      NUM_BLOCKS: 1000
     volumes:
       - crypto_data:/app/data   # SQLite DB — persists wallets and blockchain across restarts
     networks:
