@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 # have been built on top of it. 2 mirrors a common educational minimum.
 CONFIRMATION_DEPTH = 2
 
+# Difficulty Adjustment Algorithm (DAA) parameters.
+# Every ADJUSTMENT_INTERVAL blocks the chain recalculates the PoW target
+# to keep average solve time close to TARGET_BLOCK_TIME_SECS — matching
+# the spirit of Bitcoin's 2-week / 2016-block retarget window.
+ADJUSTMENT_INTERVAL  = 3      # blocks between each recalculation
+TARGET_BLOCK_TIME_SECS = 10.0 # desired seconds per block
+MAX_DIFFICULTY = 8            # hard ceiling (matches /start validation)
+
 
 class Blockchain:
     """
@@ -191,6 +199,61 @@ class Blockchain:
             "Block appended: %s  (chain length now: %d)",
             block, len(self.chain)
         )
+
+    def recalculate_difficulty(self) -> int | None:
+        """
+        Bitcoin-style Difficulty Adjustment Algorithm.
+
+        Called after every append_block().  Returns the new difficulty value
+        when an adjustment is made, or None when no adjustment occurs.
+
+        Adjustment fires when the chain tip index is a positive multiple of
+        ADJUSTMENT_INTERVAL (i.e. every 3rd mined block, skipping genesis).
+
+        Formula:
+          actual_time = elapsed seconds over the last ADJUSTMENT_INTERVAL blocks
+          ratio       = actual_time / (ADJUSTMENT_INTERVAL * TARGET_BLOCK_TIME_SECS)
+          new_diff    = round(current_difficulty / ratio)
+
+        ratio < 1 → blocks came in fast → raise difficulty
+        ratio > 1 → blocks came in slow → lower difficulty
+
+        Bitcoin caps the ratio change at 4× in either direction per window
+        to prevent runaway adjustments; we do the same.
+        Difficulty is always clamped to [1, MAX_DIFFICULTY].
+        """
+        tip_index = self.last_block.index
+        # Only adjust at positive multiples of the interval (never at genesis)
+        if tip_index == 0 or tip_index % ADJUSTMENT_INTERVAL != 0:
+            return None
+        if len(self.chain) <= ADJUSTMENT_INTERVAL:
+            return None  # not enough history yet
+
+        window_start = self.chain[tip_index - ADJUSTMENT_INTERVAL]
+        window_end   = self.last_block
+        actual_time  = window_end.timestamp - window_start.timestamp
+
+        # Guard against zero / negative elapsed time (e.g. fast test machines)
+        if actual_time <= 0:
+            actual_time = 0.001
+
+        expected_time = ADJUSTMENT_INTERVAL * TARGET_BLOCK_TIME_SECS
+        ratio = actual_time / expected_time
+
+        # Cap adjustment at 4× per window (Bitcoin's rule)
+        ratio = max(0.25, min(4.0, ratio))
+
+        new_difficulty = max(1, min(MAX_DIFFICULTY, round(self.difficulty / ratio)))
+
+        if new_difficulty != self.difficulty:
+            logger.info(
+                "DAA: difficulty %d → %d  (window=%d blocks, actual=%.1fs, expected=%.1fs, ratio=%.2f)",
+                self.difficulty, new_difficulty,
+                ADJUSTMENT_INTERVAL, actual_time, expected_time, ratio,
+            )
+            self.difficulty = new_difficulty
+
+        return new_difficulty
 
     # ------------------------------------------------------------------
     # Serialization

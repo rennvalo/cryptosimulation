@@ -268,10 +268,14 @@ def _mining_loop(target: str) -> None:
 
     while not _shutdown.is_set():
 
-        # --- Snapshot current tip atomically ---
+        # --- Snapshot current tip and mining target atomically ---
         with _lock:
-            tip_index = _current_tip["index"]
-            tip_hash  = _current_tip["hash"]
+            tip_index      = _current_tip["index"]
+            tip_hash       = _current_tip["hash"]
+        # Read _mining_target outside the lock (it's a plain string assignment
+        # — atomic on CPython — and we re-snapshot each outer iteration so any
+        # DAA adjustment received via /new_block is picked up immediately).
+        current_target = _mining_target
 
         next_index = tip_index + 1
 
@@ -292,8 +296,8 @@ def _mining_loop(target: str) -> None:
         )
 
         logger.info(
-            "Starting PoW for block #%d  (prev_hash=...%s)",
-            next_index, tip_hash[-8:] if tip_hash else "0" * 8,
+            "Starting PoW for block #%d  (prev_hash=...%s)  target='%s'",
+            next_index, tip_hash[-8:] if tip_hash else "0" * 8, current_target,
         )
 
         start_time = time.time()
@@ -305,7 +309,7 @@ def _mining_loop(target: str) -> None:
             candidate.nonce = nonce
             candidate.hash  = candidate.compute_hash()
 
-            if candidate.hash.startswith(target):
+            if candidate.hash.startswith(current_target):
                 # ====== SOLVED ======
                 solve_time = time.time() - start_time
                 logger.info(
@@ -395,12 +399,26 @@ async def new_block(payload: dict) -> dict:
     We update our local chain tip and set _stop_event to interrupt the
     mining thread's inner nonce loop so it restarts at the new height.
     This is the push-based block propagation that mirrors Bitcoin.
+
+    The node also includes the current difficulty in the payload so that
+    after a DAA adjustment the miner picks up the new target immediately.
     """
+    global _mining_target
+
     block = Block.from_dict(payload)
 
     with _lock:
         _current_tip["index"] = block.index
         _current_tip["hash"]  = block.hash
+
+    # DAA: if the node adjusted difficulty, honour the new target now
+    new_diff = payload.get("difficulty")
+    if new_diff and isinstance(new_diff, int):
+        _mining_target = "0" * new_diff
+        logger.info(
+            "Difficulty updated → %d  (new target: '%s')",
+            new_diff, _mining_target,
+        )
 
     _stop_event.set()
     logger.info(
@@ -408,6 +426,60 @@ async def new_block(payload: dict) -> dict:
         block.index, block.hash[-8:],
     )
     return {"status": "ok"}
+
+
+@app.post("/sign_transfer")
+async def sign_transfer(payload: dict) -> JSONResponse:
+    """
+    Called by the node when a portal user buys RNC from this miner.
+
+    The node has already confirmed that this miner has sufficient balance;
+    this endpoint simply signs the transfer and returns the ready-to-mine
+    tx_dict.  The node then calls _mine_transfer_block() to commit it.
+
+    Body: { "to_addr": str, "amount": float }
+    Returns: { "tx": tx_dict }
+    """
+    import hashlib as _hs
+    import json as _j
+
+    to_addr = payload.get("to_addr", "").strip()
+    amount  = float(payload.get("amount", 0))
+
+    if not to_addr or amount <= 0:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "to_addr and positive amount required"},
+        )
+
+    timestamp = time.time()
+    tx_id = _hs.sha256(
+        f"{_wallet.address}:{to_addr}:{amount}:{timestamp}".encode()
+    ).hexdigest()
+    signing_payload = _j.dumps(
+        {
+            "from_addr": _wallet.address,
+            "to_addr":   to_addr,
+            "amount":    amount,
+            "timestamp": timestamp,
+        },
+        sort_keys=True,
+    )
+    sig = _wallet.sign(signing_payload)
+
+    tx_dict = {
+        "tx_id":     tx_id,
+        "from_addr": _wallet.address,
+        "to_addr":   to_addr,
+        "amount":    amount,
+        "timestamp": timestamp,
+        "signature": sig,
+    }
+    logger.info(
+        "Signed transfer: %.4f RNC → %s...  tx_id=%s...",
+        amount, to_addr[:12], tx_id[:12],
+    )
+    return JSONResponse(status_code=200, content={"tx": tx_dict})
 
 
 @app.post("/shutdown")

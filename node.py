@@ -31,7 +31,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from block import Block
-from blockchain import Blockchain
+from blockchain import Blockchain, MAX_DIFFICULTY, TARGET_BLOCK_TIME_SECS
 from transaction import Transaction
 from wallet import Wallet, verify_signature
 
@@ -98,7 +98,7 @@ def load_state() -> None:
     from blockchain import Blockchain as _Blockchain
 
     global blockchain, started, DIFFICULTY, NUM_BLOCKS, _finalized_height
-    global active_miner_ids, simulation_done, _treasury, _treasury_balance, _rnc_price
+    global active_miner_ids, simulation_done, _rnc_price
 
     with _db_connect() as conn:
         # ── Portal wallets ─────────────────────────────────────────────────
@@ -120,16 +120,6 @@ def load_state() -> None:
 
         # ── Simulation meta ────────────────────────────────────────────────
         meta = dict(conn.execute("SELECT key, value FROM app_meta").fetchall())
-
-        # Restore treasury wallet so buy/send still work after a restart
-        if meta.get("treasury_private_key"):
-            _treasury = _Wallet(private_key_hex=meta["treasury_private_key"])
-            _treasury_balance = float(meta.get("treasury_balance", TREASURY_INITIAL_RNC))
-            addr_to_pubkey[_treasury.address] = _treasury.public_key_hex
-            logging.getLogger(__name__).info(
-                "Treasury wallet restored: addr=%s  balance=%.4f RNC",
-                _treasury.address, _treasury_balance,
-            )
 
         if meta.get("rnc_price"):
             _rnc_price = float(meta["rnc_price"])
@@ -261,13 +251,6 @@ miner_addresses: dict[str, str] = {}
 addr_to_pubkey: dict[str, str] = {}
 
 # ---------------------------------------------------------------------------
-# Treasury wallet — pre-funded, used to back the faucet / RNC purchases
-# ---------------------------------------------------------------------------
-_treasury = Wallet()          # fresh keypair each node start (fine for simulation)
-TREASURY_INITIAL_RNC = 10_000.0   # virtual credit — injected at sim start
-_treasury_balance: float = 0.0    # set when simulation starts
-
-# ---------------------------------------------------------------------------
 # Portal user wallets (server-side, custodial)
 # username → Wallet   |   username → fake USD balance
 # ---------------------------------------------------------------------------
@@ -357,8 +340,13 @@ async def broadcast_block_to_miners(block: Block) -> None:
     This mirrors Bitcoin's block propagation: when the network accepts a
     block, all nodes (miners) receive it immediately so they can abandon
     their current nonce search and start working on the next block height.
+
+    The current DIFFICULTY is included in the payload so that if a DAA
+    adjustment just occurred, miners pick up the new target immediately
+    without needing a separate config poll.
     """
     payload = block.to_dict()
+    payload["difficulty"] = DIFFICULTY   # DAA: propagate current target to miners
     async with httpx.AsyncClient(timeout=5.0) as client:
         for miner_id, url in list(miner_registry.items()):
             try:
@@ -586,7 +574,7 @@ async def submit_block(payload: dict) -> JSONResponse:
 
     Returns 200 on success, 409 if stale, 400 if invalid.
     """
-    global simulation_done
+    global simulation_done, DIFFICULTY
 
     if not started or blockchain is None:
         return JSONResponse(
@@ -660,11 +648,12 @@ async def submit_block(payload: dict) -> JSONResponse:
 
     # Push a structured block event to SSE clients for the chain panel
     block_event = {
-        "index":  block.index,
-        "miner":  miner_id,
-        "hash":   block.hash[:16] + "...",
-        "nonce":  block.nonce,
-        "time":   round(solve_time, 2),
+        "index":      block.index,
+        "miner":      miner_id,
+        "hash":       block.hash[:16] + "...",
+        "nonce":      block.nonce,
+        "time":       round(solve_time, 2),
+        "difficulty": DIFFICULTY,  # DAA: let dashboard reflect current target
     }
     for q in list(_sse_clients):
         try:
@@ -709,7 +698,29 @@ async def submit_block(payload: dict) -> JSONResponse:
     # Kick off P2P validation and broadcast in the background
     asyncio.create_task(_peer_validate_block(block, miner_id))
 
-    # Check simulation target
+    # --- Difficulty Adjustment Algorithm (DAA) ---
+    # Must run BEFORE the NUM_BLOCKS check so reaching max difficulty
+    # also triggers shutdown cleanly.
+    new_diff = blockchain.recalculate_difficulty()
+    if new_diff is not None:
+        DIFFICULTY = new_diff
+        _db_save_meta(difficulty=str(new_diff))
+        await log_event(
+            f"📈 Difficulty adjusted → {new_diff} at block #{block.index}  "
+            f"(target: {TARGET_BLOCK_TIME_SECS:.0f}s/block)"
+        )
+        if new_diff >= MAX_DIFFICULTY:
+            simulation_done = True
+            _db_save_meta(simulation_done="true")
+            await log_event(
+                f"=== Max difficulty ({MAX_DIFFICULTY}) reached at block #{block.index}. "
+                f"Mining complete. Trading continues. ==="
+            )
+            await broadcast_block_to_miners(block)
+            asyncio.create_task(signal_shutdown_to_miners())
+            return JSONResponse(status_code=200, content={"status": "accepted"})
+
+    # Check simulation target (block count)
     if blockchain.last_block.index >= NUM_BLOCKS:
         simulation_done = True
         _db_save_meta(simulation_done="true")
@@ -855,10 +866,6 @@ async def start_simulation(payload: dict) -> JSONResponse:
     active_miner_ids = _registered_order[:num_miners]
     started = True
 
-    # Initialise treasury: register its pubkey and give it a virtual RNC balance
-    global _treasury_balance
-    _treasury_balance = TREASURY_INITIAL_RNC
-    addr_to_pubkey[_treasury.address] = _treasury.public_key_hex
     # Seed the price history with the starting price
     _price_history.append({"t": int(time.time() * 1000), "price": _rnc_price})
 
@@ -871,8 +878,6 @@ async def start_simulation(payload: dict) -> JSONResponse:
         finalized_height=_finalized_height,
         simulation_done="false",
         active_miner_ids=json.dumps(active_miner_ids),
-        treasury_private_key=_treasury.private_key_hex,
-        treasury_balance=TREASURY_INITIAL_RNC,
     )
 
     start_data = {
@@ -906,7 +911,7 @@ async def reset_simulation() -> JSONResponse:
     without needing a container restart.
     """
     global started, blockchain, simulation_done, active_miner_ids
-    global _mempool, _finalized_height, _recent_accepted, _treasury_balance, _rnc_price
+    global _mempool, _finalized_height, _recent_accepted, _rnc_price
     global _price_history
 
     started           = False
@@ -916,7 +921,6 @@ async def reset_simulation() -> JSONResponse:
     _mempool          = []
     _finalized_height = -1
     _recent_accepted  = {}
-    _treasury_balance = 0.0
     _rnc_price        = BASE_RNC_PRICE_USD
     _price_history    = []
     _event_log.clear()
@@ -1147,12 +1151,19 @@ async def portal_login(payload: dict) -> JSONResponse:
 @app.post("/portal/buy_rnc")
 async def portal_buy_rnc(payload: dict) -> JSONResponse:
     """
-    User spends fake USD to buy RNC from the treasury.
+    User spends fake USD to buy RNC from active miners.
     Body: { "username": str, "usd_amount": float }
-    The treasury signs a transfer directly to the user's wallet address and
-    an on-demand transfer block is mined immediately.
+
+    RNC is sourced exclusively from coins already earned by miners — none
+    is created from thin air.  The purchase is split proportionally across
+    all active miners by their current RNC balance.  Each miner signs its
+    own partial transfer via POST miner_url/sign_transfer.
+
+    If total miner supply is less than the requested amount, only what is
+    available is filled and the USD charge is proportionally reduced
+    (partial fill).
     """
-    global _treasury_balance, _rnc_price
+    global _rnc_price
 
     username   = payload.get("username", "").strip()
     usd_amount = float(payload.get("usd_amount", 0))
@@ -1161,74 +1172,109 @@ async def portal_buy_rnc(payload: dict) -> JSONResponse:
         return JSONResponse(status_code=404, content={"error": "user not found"})
     if usd_amount <= 0:
         return JSONResponse(status_code=400, content={"error": "usd_amount must be positive"})
-
-    rnc_amount = round(usd_amount / _rnc_price, 4)
-    if rnc_amount <= 0:
-        return JSONResponse(status_code=400, content={"error": "amount too small"})
-    if portal_usd[username] < usd_amount:
-        return JSONResponse(status_code=400, content={"error": "Insufficient USD balance"})
-    if _treasury_balance < rnc_amount:
-        return JSONResponse(status_code=400, content={"error": "Treasury insufficient funds"})
     if blockchain is None:
         return JSONResponse(status_code=503, content={"error": "Simulation not started"})
+    if portal_usd[username] < usd_amount:
+        return JSONResponse(status_code=400, content={"error": "Insufficient USD balance"})
 
-    # Deduct USD, debit treasury, bump price by 1–50% of current price
+    # --- Determine supply available across all active miners ---
+    all_balances = blockchain.compute_balances(confirmed_only=False)
+    miner_balances = {
+        mid: all_balances.get(miner_addresses.get(mid, ""), 0.0)
+        for mid in active_miner_ids
+        if miner_addresses.get(mid)
+    }
+    miner_balances = {mid: bal for mid, bal in miner_balances.items() if bal > 0}
+    total_available = round(sum(miner_balances.values()), 4)
+
+    if total_available <= 0:
+        return JSONResponse(status_code=400, content={
+            "error": "No RNC in circulation yet — miners have not earned any coins. "
+                     "Wait for more blocks to be mined."
+        })
+
+    # Partial fill: cap to available supply
+    requested  = round(usd_amount / _rnc_price, 4)
+    rnc_amount = min(requested, total_available)
+    usd_amount = round(rnc_amount * _rnc_price, 4)  # recalculate actual USD charged
+
+    if rnc_amount <= 0:
+        return JSONResponse(status_code=400, content={"error": "amount too small"})
+
+    # --- Proportional split across miners ---
+    seller_shares: list[tuple[str, float]] = []
+    for mid, bal in miner_balances.items():
+        share = round(bal / total_available * rnc_amount, 4)
+        if share > 0:
+            seller_shares.append((mid, share))
+    # Absorb rounding error into the last seller
+    diff = round(rnc_amount - sum(s for _, s in seller_shares), 4)
+    if seller_shares and diff != 0:
+        last_mid, last_share = seller_shares[-1]
+        seller_shares[-1] = (last_mid, round(last_share + diff, 4))
+
+    # Deduct USD from buyer, bump price, persist
     portal_usd[username] = round(portal_usd[username] - usd_amount, 4)
-    _treasury_balance    = round(_treasury_balance - rnc_amount, 4)
     price_bump = round(random.uniform(0.01, 0.50) * _rnc_price, 2)
     _rnc_price = round(_rnc_price + price_bump, 2)
-    # Persist updated USD, treasury, and price
     _db_update_portal_usd(username, portal_usd[username])
-    _db_save_meta(treasury_balance=_treasury_balance, rnc_price=_rnc_price)
+    _db_save_meta(rnc_price=_rnc_price)
     _price_history.append({"t": int(time.time() * 1000), "price": _rnc_price})
 
-    # Treasury signs the transfer
-    to_addr   = portal_wallets[username].address
-    timestamp = time.time()
-    import hashlib as _hs
-    tx_id = _hs.sha256(f"{_treasury.address}:{to_addr}:{rnc_amount}:{timestamp}".encode()).hexdigest()
-    import json as _j
-    signing_payload = _j.dumps(
-        {"from_addr": _treasury.address, "to_addr": to_addr,
-         "amount": rnc_amount, "timestamp": timestamp}, sort_keys=True
+    # Ask each miner to sign its partial transfer, then mine it
+    to_addr = portal_wallets[username].address
+    tx_ids: list[str] = []
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for mid, share in seller_shares:
+            url = miner_registry.get(mid)
+            if not url:
+                continue
+            try:
+                resp = await client.post(
+                    f"{url}/sign_transfer",
+                    json={"to_addr": to_addr, "amount": share},
+                )
+                resp.raise_for_status()
+                tx_dict = resp.json()["tx"]
+                tx_ids.append(tx_dict["tx_id"])
+                asyncio.create_task(_mine_transfer_block(tx_dict))
+                logger.info(
+                    "Buy split: miner %s selling %.4f RNC → %s", mid, share, username
+                )
+            except Exception as exc:
+                logger.warning("sign_transfer failed for %s: %s", mid, exc)
+
+    partial_note = (
+        f" (partial fill — only {total_available:.4f} RNC in circulation)"
+        if rnc_amount < requested else ""
     )
-    sig = _treasury.sign(signing_payload)
-
-    tx_dict = {
-        "tx_id":     tx_id,
-        "from_addr": _treasury.address,
-        "to_addr":   to_addr,
-        "amount":    rnc_amount,
-        "timestamp": timestamp,
-        "signature": sig,
-    }
-
     asyncio.create_task(log_event(
         f"\U0001f4b8 Portal BUY: {username} bought {rnc_amount} RNC"
-        f" for ${usd_amount:.2f} USD — RNC price now ${_rnc_price:.2f}",
+        f" for ${usd_amount:.4f} USD — RNC price now ${_rnc_price:.2f}{partial_note}",
         "info",
     ))
-    asyncio.create_task(_mine_transfer_block(tx_dict))
 
     return JSONResponse(status_code=200, content={
-        "status":       "mining",
-        "tx_id":        tx_id,
-        "rnc_amount":   rnc_amount,
-        "usd_spent":    usd_amount,
-        "usd_balance":  portal_usd[username],
-        "rnc_price":    _rnc_price,
-        "message":      f"Buying {rnc_amount} RNC for ${usd_amount:.2f} — confirming...",
+        "status":      "mining",
+        "rnc_amount":  rnc_amount,
+        "usd_spent":   usd_amount,
+        "usd_balance": portal_usd[username],
+        "rnc_price":   _rnc_price,
+        "message":     f"Buying {rnc_amount} RNC for ${usd_amount:.4f}{partial_note} — confirming...",
     })
 
 
 @app.post("/portal/sell_rnc")
 async def portal_sell_rnc(payload: dict) -> JSONResponse:
     """
-    User sells RNC back to the treasury for fake USD.
+    User sells RNC to a randomly chosen active miner for fake USD.
     Body: { "username": str, "rnc_amount": float }
-    Price drops by a random $1-5 per RNC sold (floor $1.00).
+
+    The RNC stays in the miner economy — it goes directly to a random
+    active miner's wallet, keeping the supply fully circulating.
+    Price drops by a random 1–50% of current price per sale.
     """
-    global _treasury_balance, _rnc_price
+    global _rnc_price
 
     username   = payload.get("username", "").strip()
     rnc_amount = float(payload.get("rnc_amount", 0))
@@ -1239,8 +1285,6 @@ async def portal_sell_rnc(payload: dict) -> JSONResponse:
         return JSONResponse(status_code=400, content={"error": "rnc_amount must be positive"})
     if blockchain is None:
         return JSONResponse(status_code=503, content={"error": "Simulation not started"})
-    if _treasury is None:
-        return JSONResponse(status_code=503, content={"error": "Treasury not initialised"})
 
     sender_wallet = portal_wallets[username]
     rnc_balance   = _get_confirmed_balance(sender_wallet.address)
@@ -1249,26 +1293,33 @@ async def portal_sell_rnc(payload: dict) -> JSONResponse:
             "error": f"Insufficient RNC: have {rnc_balance:.4f}, need {rnc_amount:.4f}"
         })
 
+    # Pick a random active miner as the buyer; RNC stays in the miner economy
+    eligible = [mid for mid in active_miner_ids if miner_addresses.get(mid)]
+    if not eligible:
+        return JSONResponse(status_code=503, content={
+            "error": "No active miners available to receive RNC"
+        })
+    buyer_miner_id = random.choice(eligible)
+    buyer_addr     = miner_addresses[buyer_miner_id]
+
     usd_received = round(rnc_amount * _rnc_price, 2)
 
-    # Credit USD, restore treasury RNC, drop price
+    # Credit USD to seller, drop price, persist
     portal_usd[username] = round(portal_usd[username] + usd_received, 4)
-    _treasury_balance    = round(_treasury_balance + rnc_amount, 4)
     price_drop = round(random.uniform(0.01, 0.50) * _rnc_price, 2)
     _rnc_price = max(1.0, round(_rnc_price - price_drop, 2))
-
     _db_update_portal_usd(username, portal_usd[username])
-    _db_save_meta(treasury_balance=_treasury_balance, rnc_price=_rnc_price)
+    _db_save_meta(rnc_price=_rnc_price)
     _price_history.append({"t": int(time.time() * 1000), "price": _rnc_price})
 
-    # Sign and mine a transfer: user → treasury
+    # User signs the transfer to the receiving miner
     timestamp = time.time()
     import hashlib as _hs, json as _j
     tx_id = _hs.sha256(
-        f"{sender_wallet.address}:{_treasury.address}:{rnc_amount}:{timestamp}".encode()
+        f"{sender_wallet.address}:{buyer_addr}:{rnc_amount}:{timestamp}".encode()
     ).hexdigest()
     signing_payload = _j.dumps(
-        {"from_addr": sender_wallet.address, "to_addr": _treasury.address,
+        {"from_addr": sender_wallet.address, "to_addr": buyer_addr,
          "amount": rnc_amount, "timestamp": timestamp}, sort_keys=True
     )
     sig = sender_wallet.sign(signing_payload)
@@ -1276,13 +1327,14 @@ async def portal_sell_rnc(payload: dict) -> JSONResponse:
     tx_dict = {
         "tx_id":     tx_id,
         "from_addr": sender_wallet.address,
-        "to_addr":   _treasury.address,
+        "to_addr":   buyer_addr,
         "amount":    rnc_amount,
         "timestamp": timestamp,
         "signature": sig,
     }
     asyncio.create_task(log_event(
         f"\U0001f4c9 Portal SELL: {username} sold {rnc_amount} RNC"
+        f" to miner {buyer_miner_id}"
         f" for ${usd_received:.2f} USD — RNC price now ${_rnc_price:.2f}",
         "info",
     ))
@@ -1295,7 +1347,7 @@ async def portal_sell_rnc(payload: dict) -> JSONResponse:
         "usd_received": usd_received,
         "usd_balance":  portal_usd[username],
         "rnc_price":    _rnc_price,
-        "message":      f"Selling {rnc_amount} RNC for ${usd_received:.2f} — confirming...",
+        "message":      f"Selling {rnc_amount} RNC to miner {buyer_miner_id} for ${usd_received:.2f} — confirming...",
     })
 
 
